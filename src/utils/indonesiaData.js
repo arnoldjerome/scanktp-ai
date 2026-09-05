@@ -14,39 +14,45 @@ export const PROVINCES = [
 ];
 
 export const CITIES = [
+  'JAKARTA BARAT', 'JAKARTA PUSAT', 'JAKARTA SELATAN', 'JAKARTA TIMUR', 'JAKARTA UTARA',
   'KABUPATEN GRESIK', 'KABUPATEN PEKALONGAN', 'KOTA SEMARANG', 'KABUPATEN SEMARANG',
   'KOTA SURABAYA', 'KABUPATEN SIDOARJO', 'KABUPATEN MOJOKERTO', 'KABUPATEN PASURUAN',
   'KABUPATEN MALANG', 'KOTA MALANG', 'KABUPATEN BANYUWANGI', 'KABUPATEN JEMBER',
   'KABUPATEN KEDIRI', 'KABUPATEN LAMONGAN', 'KABUPATEN TUBAN', 'KABUPATEN BOJONEGORO',
   'KABUPATEN DEMAK', 'KABUPATEN KUDUS', 'KABUPATEN JEPARA', 'KABUPATEN PATI',
-  'KOTA BANDUNG', 'KABUPATEN BOGOR', 'KOTA BEKASI', 'KOTA TANGERANG', 'KOTA DEPOK',
-  'JAKARTA BARAT', 'JAKARTA PUSAT', 'JAKARTA SELATAN', 'JAKARTA TIMUR', 'JAKARTA UTARA'
+  'KOTA BANDUNG', 'KABUPATEN BOGOR', 'KOTA BEKASI', 'KOTA TANGERANG', 'KOTA DEPOK'
 ];
 
-const provinceFuse = new Fuse(PROVINCES, { threshold: 0.5 });
-const cityFuse = new Fuse(CITIES, { threshold: 0.5 });
+const provinceFuse = new Fuse(PROVINCES, { threshold: 0.4 });
+const cityFuse = new Fuse(CITIES, { threshold: 0.4 });
 
 export function matchFuzzyProvince(query) {
   if (!query) return 'PROVINSI JAWA TIMUR';
   const clean = query.toUpperCase().replace(/[^A-Z\s]/g, '').trim();
 
+  if (clean.includes('JAKARTA') || clean.includes('DKI')) return 'PROVINSI DKI JAKARTA';
   if (clean.includes('TIMUR') || clean.includes('TIMU')) return 'PROVINSI JAWA TIMUR';
   if (clean.includes('TENGAH')) return 'PROVINSI JAWA TENGAH';
   if (clean.includes('BARAT')) return 'PROVINSI JAWA BARAT';
-  if (clean.includes('JAKARTA')) return 'PROVINSI DKI JAKARTA';
 
   const results = provinceFuse.search(clean);
   if (results.length > 0) {
     return results[0].item;
   }
-  return 'PROVINSI JAWA TIMUR';
+  return clean ? `PROVINSI ${clean}` : 'PROVINSI JAWA TIMUR';
 }
 
 export function matchFuzzyCity(query, fullText = '') {
   const clean = (query + ' ' + fullText).toUpperCase().trim();
 
-  // Keyword & OCR typo rules for regencies
-  if (clean.includes('GRESIK') || clean.includes('GRESNF') || clean.includes('GRESH') || clean.includes('MENGANTI') || clean.includes('SETRO') || clean.includes('PENGAMPUN')) {
+  // Explicit city keyword checks
+  if (clean.includes('JAKARTA BARAT')) return 'JAKARTA BARAT';
+  if (clean.includes('JAKARTA PUSAT')) return 'JAKARTA PUSAT';
+  if (clean.includes('JAKARTA SELATAN')) return 'JAKARTA SELATAN';
+  if (clean.includes('JAKARTA TIMUR')) return 'JAKARTA TIMUR';
+  if (clean.includes('JAKARTA UTARA')) return 'JAKARTA UTARA';
+
+  if (clean.includes('GRESIK') || clean.includes('MENGANTI') || clean.includes('SETRO') || clean.includes('PENGAMPUN')) {
     return 'KABUPATEN GRESIK';
   }
   if (clean.includes('PEKALONGAN') || clean.includes('KESESI') || clean.includes('KAUMAN')) {
@@ -64,5 +70,7 @@ export function matchFuzzyCity(query, fullText = '') {
     return results[0].item;
   }
 
-  return 'KABUPATEN GRESIK';
+  // Return clean query if no fallback match
+  const fallback = query.replace(/^[:;\s\-\.=]+/, '').replace(/PROVINSI.*/i, '').trim();
+  return fallback || 'KABUPATEN GRESIK';
 }

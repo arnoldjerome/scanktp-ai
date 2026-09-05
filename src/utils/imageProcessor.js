@@ -1,7 +1,6 @@
 /**
- * e-KTP Left-Region Cropper & High-Contrast Image Processor
- * Crops out the right 32% (photo, signature, bottom issuance date) to isolate
- * ONLY the left text region of the e-KTP card for 100% OCR accuracy.
+ * e-KTP Left-Text Region Cropper (78% Width)
+ * Includes full RT/RW and Kel/Desa text while cutting off photo & signature.
  */
 
 export async function preprocessImageForOCR(fileOrUrl) {
@@ -26,9 +25,8 @@ export async function preprocessImageForOCR(fileOrUrl) {
         fullCtx.imageSmoothingQuality = 'high';
         fullCtx.drawImage(img, 0, 0, width, height);
 
-        // Crop ONLY the left text region (68% of width)
-        // This completely eliminates interference from the person's photo, signature, and bottom-right text!
-        const cropWidth = Math.round(width * 0.68);
+        // Crop 78% width: captures all left text (RT/RW, Kel/Desa, etc.) while excluding face photo
+        const cropWidth = Math.round(width * 0.78);
         const cropCanvas = document.createElement('canvas');
         const cropCtx = cropCanvas.getContext('2d');
 
@@ -40,7 +38,7 @@ export async function preprocessImageForOCR(fileOrUrl) {
         const imageData = cropCtx.getImageData(0, 0, cropWidth, height);
         const data = imageData.data;
 
-        // Apply Red-Channel Focus & High Contrast on the cropped left region
+        // Apply Red-Channel Focus & High Contrast
         const grays = new Uint8Array(cropWidth * height);
         let minG = 255;
         let maxG = 0;

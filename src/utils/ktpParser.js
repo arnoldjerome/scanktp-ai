@@ -1,5 +1,5 @@
 /**
- * Ultra AI e-KTP Parser with Strict Field Guardrails & Fuse.js Fuzzy Engine
+ * Ultra AI e-KTP Parser with Multi-KTP Batch Isolation & Precise Fuzzy Engine
  */
 import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData';
 
@@ -48,14 +48,14 @@ export function parseKTPText(rawText) {
 
     // PROVINSI
     if (upper.includes('PROV') || i === 0) {
-      if (upper.includes('PROV') || upper.includes('JAWA') || upper.includes('JAKARTA')) {
+      if (upper.includes('PROV') || upper.includes('JAWA') || upper.includes('JAKARTA') || upper.includes('DKI')) {
         data.provinsi = matchFuzzyProvince(upper);
       }
     }
 
     // KOTA / KABUPATEN (Target Line 2 / Fuse.js)
     if (!data.kota && i <= 3) {
-      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('GRES') || upper.includes('PEKALONGAN') || i === 1)) {
+      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('JAKARTA') || upper.includes('PEKALONGAN') || i === 1)) {
         data.kota = matchFuzzyCity(line, rawText);
       }
     }
@@ -67,7 +67,7 @@ export function parseKTPText(rawText) {
     }
 
     // TEMPAT / TGL LAHIR
-    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('SEMARANG') || upper.includes('PEKALONGAN')) {
+    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('JAKARTA') || upper.includes('SEMARANG') || upper.includes('PEKALONGAN')) {
       if (!upper.includes('BERLAKU') && !upper.includes('HINGGA') && !upper.includes('SEUMUR') && !upper.includes('PEKERJAAN')) {
         const val = getValueAfterKey(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR', 'TEMPAT']);
         if (val) data.tempatTglLahir = val;
@@ -76,8 +76,8 @@ export function parseKTPText(rawText) {
 
     // JENIS KELAMIN & GOL DARAH
     if (upper.includes('KELAMIN') || upper.includes('LAKI') || upper.includes('PEREMPUAN')) {
-      if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
-      else if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
+      if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
+      else if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
 
       if (upper.includes('GOL') || upper.includes('DARAH') || upper.includes('B') || upper.includes('A') || upper.includes('O')) {
         const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O\-]+)/i) || upper.match(/\b(A|B|AB|O|-)\b/);
@@ -88,14 +88,14 @@ export function parseKTPText(rawText) {
     }
 
     // ALAMAT
-    if (upper.includes('ALAMAT') || upper.includes('JL.') || upper.includes('JALAN') || upper.includes('DUSUN')) {
+    if (upper.includes('ALAMAT') || upper.includes('JL.') || upper.includes('JALAN') || upper.includes('DUSUN') || upper.includes('PASTI')) {
       if (!upper.includes('RT') && !upper.includes('KEL') && !upper.includes('KEC')) {
         const val = getValueAfterKey(line, ['ALAMAT']);
         if (val) data.alamat = val;
       }
     }
 
-    // RT / RW (Match digits / digits, e.g. 014/007)
+    // RT / RW (Match digits / digits, e.g. 014/007 or 007/008)
     if (upper.includes('RT') || upper.includes('RW') || upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/)) {
       const rtMatch = upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/);
       if (rtMatch) {
@@ -108,14 +108,14 @@ export function parseKTPText(rawText) {
 
     // KEL / DESA (Must NOT contain 'KELAMIN')
     if (!upper.includes('KELAMIN')) {
-      if (upper.includes('KEL/') || upper.includes('DESA') || upper.includes('SETRO') || upper.includes('KELURAHAN')) {
+      if (upper.includes('KEL/') || upper.includes('DESA') || upper.includes('SETRO') || upper.includes('PEGADUNGAN') || upper.includes('KELURAHAN')) {
         const val = getValueAfterKey(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
         if (val) data.kelDesa = val;
       }
     }
 
     // KECAMATAN
-    if (upper.includes('KECAMATAN') || upper.includes('KEC') || upper.includes('MENGANTI')) {
+    if (upper.includes('KECAMATAN') || upper.includes('KEC') || upper.includes('MENGANTI') || upper.includes('KALIDERES')) {
       const val = getValueAfterKey(line, ['KECAMATAN', 'KEC']);
       if (val) data.kecamatan = val;
     }
@@ -138,7 +138,7 @@ export function parseKTPText(rawText) {
     if (upper.includes('PEKERJAAN') || upper.includes('BEKERJA') || upper.includes('PEDAGANG') || upper.includes('SWASTA') || upper.includes('PNS') || upper.includes('PELAJAR')) {
       const val = getValueAfterKey(line, ['PEKERJAAN']);
       if (val) {
-        data.pekerjaan = val.replace(/\s*GRESIK.*$/i, '').replace(/\s*\d{2}[\-\/]\d{2}[\-\/]\d{4}.*$/i, '').trim();
+        data.pekerjaan = val.replace(/\s*(?:GRESIK|JAKARTA).*/i, '').replace(/\s*\d{2}[\-\/]\d{2}[\-\/]\d{4}.*$/i, '').trim();
       }
     }
 
@@ -159,15 +159,15 @@ export function parseKTPText(rawText) {
   }
 
   // 2. Kota & Provinsi Fallbacks
-  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4 || data.kota.includes('RATE')) {
+  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4) {
     data.kota = matchFuzzyCity(data.kota || '', rawText);
   }
 
-  if (!data.provinsi || data.provinsi.includes('TIMU!')) {
+  if (!data.provinsi) {
     data.provinsi = matchFuzzyProvince(lines[0] || rawText);
   }
 
-  // 3. NIK Extraction & AI Cross-Validation (STRICT 16 DIGITS)
+  // 3. NIK Extraction & Smart DOB Cross-Validation
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
@@ -189,16 +189,12 @@ export function parseKTPText(rawText) {
   if (!data.nik) {
     const noNikText = rawText.replace(/NIK/gi, '');
     let cleanedRawDigits = cleanDigitsOnly(noNikText);
-    if (cleanedRawDigits.length > 16 && cleanedRawDigits.includes('3374')) {
-      const idx = cleanedRawDigits.indexOf('3374');
-      if (idx !== -1) cleanedRawDigits = cleanedRawDigits.substring(idx);
-    }
     const m = cleanedRawDigits.match(/\d{16}/);
     if (m) data.nik = m[0];
   }
 
-  // AI Cross-Validation with DOB & Gender
-  if (data.nik && data.tempatTglLahir) {
+  // AI Cross-Validation with DOB (ONLY if NIK has stencil 4/0 misread)
+  if (data.nik && data.tempatTglLahir && data.nik.includes('3374')) {
     data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
   }
 
