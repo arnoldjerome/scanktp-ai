@@ -122,8 +122,7 @@ export default function App() {
       
       // Configure Tesseract parameters for e-KTP card layout
       await worker.setParameters({
-        tessedit_pageseg_mode: '6', // Assume a single uniform block of text
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:-/, \n'
+        tessedit_pageseg_mode: '3', // Fully automatic page segmentation mode
       });
 
       let combinedRawText = '';

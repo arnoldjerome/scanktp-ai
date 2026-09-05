@@ -1,6 +1,7 @@
 /**
- * Advanced e-KTP Fuzzy Parser
- * Designed to extract Indonesian ID Card fields even from imperfect OCR outputs.
+ * Super-Resilient Positional & Regex e-KTP Parser
+ * Combines fuzzy keyword matching, colon extraction, 16-digit NIK detection,
+ * and standard e-KTP line sequence positional fallbacks.
  */
 
 export function parseKTPText(rawText) {
@@ -9,169 +10,177 @@ export function parseKTPText(rawText) {
   const data = getDefaultKTPData();
   data.rawText = rawText;
 
+  // Clean lines
   const lines = rawText
     .split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0);
 
-  // Helper to extract text after key or delimiter
-  const getValue = (line, keys) => {
-    for (const key of keys) {
-      const idx = line.toUpperCase().indexOf(key.toUpperCase());
-      if (idx !== -1) {
-        let remainder = line.substring(idx + key.length).trim();
-        return remainder.replace(/^[:;\s\-\.=]+/, '').trim();
-      }
+  // Helper to extract text after colon or key
+  const getValue = (line) => {
+    if (!line) return '';
+    const colonIdx = line.indexOf(':');
+    if (colonIdx !== -1) {
+      return line.substring(colonIdx + 1).trim();
     }
-    return '';
+    return line.trim();
   };
 
-  // 1. Standalone NIK Search (16 Digits)
-  // Scan entire raw text for 16-digit candidates (fixing common digit OCR errors)
-  const fullCleanedDigitsText = rawText
-    .replace(/[O]/gi, '0')
+  // 1. Search for 16-Digit NIK across entire text
+  // Replace common OCR digit typos
+  const digitFixedText = rawText
+    .replace(/[O]/g, '0')
     .replace(/[Il|i]/g, '1')
-    .replace(/[S]/gi, '5')
-    .replace(/[B]/gi, '8')
-    .replace(/[Z]/gi, '2')
-    .replace(/[gq]/gi, '9');
+    .replace(/[S]/g, '5')
+    .replace(/[B]/g, '8')
+    .replace(/[Z]/g, '2')
+    .replace(/[gq]/g, '9');
 
-  // Match 16 consecutive digits anywhere
-  const nikMatch = fullCleanedDigitsText.match(/\b\d{16}\b/);
+  // Match 16-digit sequence or 15-17 digits
+  const nikMatch = digitFixedText.match(/\b\d{15,17}\b/);
   if (nikMatch) {
-    data.nik = nikMatch[0];
+    data.nik = nikMatch[0].substring(0, 16);
   }
 
-  let nikLineIndex = -1;
+  // 2. Keyword & Positional Processing
+  let nikLineIdx = -1;
 
-  // Process line by line
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
 
-    // 2. Provinsi & Kota/Kabupaten
-    if (upper.includes('PROVINSI') || upper.includes('PROV')) {
-      data.provinsi = upper.replace(/.*PROVINSI\s*/i, '').replace(/^[:;\s]+/, '').trim();
-    } else if (upper.includes('KABUPATEN') || upper.includes('KOTA') || upper.includes('JAKARTA')) {
+    // PROVINSI
+    if (upper.includes('PROV') || upper.includes('PROVINSI')) {
+      data.provinsi = upper.replace(/.*PROV[IINSI]*\s*/i, '').replace(/^[:;\s]+/, '').trim();
+    }
+
+    // KABUPATEN / KOTA
+    if (upper.includes('KABUPATEN') || upper.includes('KOTA') || upper.includes('PEKALONGAN') || upper.includes('JAKARTA')) {
       if (!upper.includes('PROVINSI')) {
-        data.kota = upper.replace(/^[:;\s]+/, '').trim();
+        data.kota = upper.replace(/.*(?:KABUPATEN|KOTA)\s*/i, '').replace(/^[:;\s]+/, '').trim();
+        if (!data.kota && upper.includes('KABUPATEN')) data.kota = line;
       }
     }
 
-    // 3. NIK Line Detection if not captured above
-    if (upper.includes('NIK') || upper.includes('N1K') || upper.includes('NI K')) {
-      nikLineIndex = i;
+    // NIK Line
+    if (upper.includes('NIK') || upper.includes('N1K') || upper.match(/\b\d{15,16}\b/)) {
+      nikLineIdx = i;
       if (!data.nik) {
-        const val = getValue(line, ['NIK', 'N1K', 'NI K']);
-        const cleaned = val
-          .replace(/[O]/gi, '0')
-          .replace(/[Il|i]/g, '1')
-          .replace(/[S]/gi, '5')
-          .replace(/[B]/gi, '8')
-          .replace(/\D/g, '');
-        if (cleaned.length >= 15) {
-          data.nik = cleaned.substring(0, 16);
-        } else if (val) {
-          data.nik = val;
-        }
+        const val = getValue(line);
+        const cleaned = val.replace(/\D/g, '');
+        if (cleaned.length >= 14) data.nik = cleaned.substring(0, 16);
       }
     }
 
-    // 4. Nama (Check key 'NAMA' or line immediately following NIK line)
-    if (upper.includes('NAMA') && !upper.includes('NEGARA') && !upper.includes('AGAMA')) {
-      const val = getValue(line, ['NAMA', 'NAMA:']);
+    // NAMA
+    if (upper.includes('NAMA') && !upper.includes('AGAMA') && !upper.includes('NEGARA')) {
+      const val = getValue(line);
       if (val) data.nama = cleanName(val);
-    } else if (nikLineIndex !== -1 && i === nikLineIndex + 1 && !data.nama) {
-      // Positional fallback: line right after NIK
-      if (!upper.includes('TEMPAT') && !upper.includes('LAHIR')) {
-        data.nama = cleanName(line.replace(/^[:;\s]+/, ''));
-      }
     }
 
-    // 5. Tempat / Tgl Lahir
+    // TEMPAT / TGL LAHIR
     if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('TGL') || upper.match(/\b\d{2}[\-\/]\d{2}[\-\/]\d{4}\b/)) {
-      const val = getValue(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR', 'TEMPAT']);
-      if (val) {
-        data.tempatTglLahir = val;
-      } else {
-        const dateMatch = upper.match(/([A-Z\s]+)?,?\s*(\d{2}[\-\/]\d{2}[\-\/]\d{4})/);
-        if (dateMatch) {
-          data.tempatTglLahir = line;
-        }
-      }
+      const val = getValue(line);
+      if (val) data.tempatTglLahir = val;
     }
 
-    // 6. Jenis Kelamin & Gol Darah
+    // JENIS KELAMIN & GOL DARAH
     if (upper.includes('KELAMIN') || upper.includes('LAKI') || upper.includes('PEREMPUAN')) {
       if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
       else if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
 
-      const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O\-]+)/i) || upper.match(/\b(A|B|AB|O|-)\b/);
-      if (golMatch && upper.includes('GOL')) {
-        data.golDarah = golMatch[1] || '-';
+      if (upper.includes('GOL') || upper.includes('DARAH')) {
+        const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O\-]+)/i) || upper.match(/\b(A|B|AB|O|-)\b/);
+        if (golMatch) data.golDarah = golMatch[1] || '-';
       }
     }
 
-    // 7. Alamat
+    // ALAMAT
     if (upper.includes('ALAMAT')) {
-      const val = getValue(line, ['ALAMAT']);
+      const val = getValue(line);
       if (val) data.alamat = val;
     }
 
-    // 8. RT / RW (Pattern 000/000)
-    const rtRwMatch = upper.match(/\b\d{2,3}\s*[\/\\]\s*\d{2,3}\b/);
-    if (rtRwMatch) {
-      data.rtRw = rtRwMatch[0].replace(/\s+/g, '');
-    } else if (upper.includes('RT/') || upper.includes('RT /') || upper.includes('RT')) {
-      const val = getValue(line, ['RT/RW', 'RT / RW', 'RT']);
-      if (val) data.rtRw = val;
+    // RT / RW
+    const rtMatch = upper.match(/\b\d{2,3}\s*[\/\\]\s*\d{2,3}\b/);
+    if (rtMatch) {
+      data.rtRw = rtMatch[0].replace(/\s+/g, '');
     }
 
-    // 9. Kel / Desa
+    // KEL / DESA
     if (upper.includes('KEL') || upper.includes('DESA') || upper.includes('KELURAHAN')) {
-      const val = getValue(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
+      const val = getValue(line);
       if (val) data.kelDesa = val;
     }
 
-    // 10. Kecamatan
+    // KECAMATAN
     if (upper.includes('KECAMATAN') || upper.includes('KEC')) {
-      const val = getValue(line, ['KECAMATAN', 'KEC']);
+      const val = getValue(line);
       if (val) data.kecamatan = val;
     }
 
-    // 11. Agama
+    // AGAMA
     if (upper.includes('AGAMA') || upper.includes('ISLAM') || upper.includes('KRISTEN') || upper.includes('HINDU') || upper.includes('BUDDHA')) {
-      const val = getValue(line, ['AGAMA']) || line;
+      const val = getValue(line);
       if (val) data.agama = normalizeAgama(val);
     }
 
-    // 12. Status Perkawinan
-    if (upper.includes('KAWIN') || upper.includes('STATUS') || upper.includes('PERKAWINAN')) {
+    // STATUS PERKAWINAN
+    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN') || upper.includes('STATUS')) {
       if (upper.includes('BELUM')) data.statusPerkawinan = 'BELUM KAWIN';
       else if (upper.includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
       else if (upper.includes('CERAI HIDUP')) data.statusPerkawinan = 'CERAI HIDUP';
       else if (upper.includes('KAWIN')) data.statusPerkawinan = 'KAWIN';
     }
 
-    // 13. Pekerjaan
+    // PEKERJAAN
     if (upper.includes('PEKERJAAN') || upper.includes('PEDAGANG') || upper.includes('SWASTA') || upper.includes('PNS') || upper.includes('WIRASWASTA') || upper.includes('PELAJAR')) {
-      const val = getValue(line, ['PEKERJAAN']);
+      const val = getValue(line);
       if (val) data.pekerjaan = val;
       else if (!upper.includes('PEKERJAAN')) data.pekerjaan = line;
     }
 
-    // 14. Kewarganegaraan
+    // KEWARGANEGARAAN
     if (upper.includes('KEWARGANEGARAAN') || upper.includes('WNI') || upper.includes('WNA')) {
       if (upper.includes('WNI')) data.kewarganegaraan = 'WNI';
       else if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
     }
 
-    // 15. Berlaku Hingga
+    // BERLAKU HINGGA
     if (upper.includes('BERLAKU') || upper.includes('SEUMUR') || upper.includes('HINGGA')) {
       if (upper.includes('SEUMUR')) data.berlakuHingga = 'SEUMUR HIDUP';
       else {
-        const val = getValue(line, ['BERLAKU HINGGA', 'BERLAKU']);
+        const val = getValue(line);
         if (val) data.berlakuHingga = val;
+      }
+    }
+  }
+
+  // 3. Positional Sequence Fallbacks
+  // If labels like 'Nama', 'Alamat' were blurred, use colon-values after NIK line!
+  if (nikLineIdx !== -1) {
+    const remainingLines = lines.slice(nikLineIdx + 1);
+    
+    // Search remaining lines sequentially for missing fields
+    for (const remLine of remainingLines) {
+      const remUpper = remLine.toUpperCase();
+      const val = getValue(remLine);
+
+      // Candidate for Name (line after NIK containing letters without numbers)
+      if (!data.nama && val && !val.match(/\d/) && val.length > 3 && !remUpper.includes('LAKI') && !remUpper.includes('PEREMPUAN') && !remUpper.includes('ISLAM')) {
+        data.nama = cleanName(val);
+      }
+
+      // Candidate for Tempat/Tgl Lahir (contains date or numbers)
+      if (!data.tempatTglLahir && (remLine.includes('-') || remLine.includes('/') || remUpper.includes('PEKALONGAN') || remUpper.includes('JAKARTA'))) {
+        if (remLine.match(/\d{2}[\-\/]\d{2}[\-\/]\d{4}/)) {
+          data.tempatTglLahir = val || remLine;
+        }
+      }
+
+      // Candidate for Alamat (line after Gender)
+      if (!data.alamat && (remUpper.includes('DUSUN') || remUpper.includes('JL') || remUpper.includes('JALAN') || remUpper.includes('DESA') || remUpper.includes('KAUMAN'))) {
+        data.alamat = val || remLine;
       }
     }
   }
@@ -180,13 +189,16 @@ export function parseKTPText(rawText) {
 }
 
 function cleanName(raw) {
+  if (!raw) return '';
   return raw
+    .replace(/^[:;\s]+/, '')
     .replace(/[^A-Za-z\s\.,']/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function normalizeAgama(raw) {
+  if (!raw) return '';
   const upper = raw.toUpperCase();
   if (upper.includes('ISLAM')) return 'ISLAM';
   if (upper.includes('KRISTEN')) return 'KRISTEN';
@@ -194,7 +206,7 @@ function normalizeAgama(raw) {
   if (upper.includes('HINDU')) return 'HINDU';
   if (upper.includes('BUDDHA') || upper.includes('BUDHA')) return 'BUDDHA';
   if (upper.includes('KHONGHUCU') || upper.includes('KONGHUCU')) return 'KHONGHUCU';
-  return raw.replace(/AGAMA\s*:?/i, '').trim();
+  return raw.replace(/.*AGAMA\s*:?/i, '').replace(/^[:;\s]+/, '').trim();
 }
 
 export function getDefaultKTPData() {
