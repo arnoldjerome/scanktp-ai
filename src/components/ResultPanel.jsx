@@ -210,9 +210,14 @@ export default function ResultPanel({
 
           {currentItem.status === 'error' && (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-rose-400">
-              <ShieldAlert className="w-10 h-10 mb-2" />
-              <p className="text-sm font-semibold">Gagal Memindai Foto KTP</p>
-              <p className="text-xs text-slate-400 max-w-xs mt-1">{currentItem.error || 'Foto kurang jelas atau format tidak terbaca.'}</p>
+              <ShieldAlert className="w-10 h-10 mb-3" />
+              <p className="text-sm font-semibold mb-2">Gagal Memindai Foto KTP</p>
+              <p className="text-xs text-slate-300 max-w-xs leading-relaxed bg-slate-900/60 border border-red-500/20 rounded-lg px-4 py-3">
+                {currentItem.error || 'Foto kurang jelas atau format tidak terbaca.'}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-3">
+                💡 Cek browser console (F12) untuk detail error Gemini API
+              </p>
             </div>
           )}
 

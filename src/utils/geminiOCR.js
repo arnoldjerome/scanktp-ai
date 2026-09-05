@@ -137,11 +137,24 @@ export async function scanKTPWithGemini(imageSource, apiKey) {
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    if (errText.includes('API_KEY_INVALID') || response.status === 400) {
+    let errBody = '';
+    try { errBody = await response.text(); } catch (_) {}
+
+    console.error('[Gemini API Error]', response.status, errBody.substring(0, 300));
+
+    if (response.status === 400 && (errBody.includes('API_KEY_INVALID') || errBody.includes('invalid'))) {
       throw new Error('API_KEY_INVALID');
     }
-    throw new Error(`Gemini API error ${response.status}: ${errText}`);
+    if (response.status === 429) {
+      throw new Error('Gemini API rate limit / quota habis. Coba lagi dalam 1 menit.');
+    }
+    if (response.status === 403) {
+      throw new Error('API_KEY_INVALID');
+    }
+    if (response.status === 500 || response.status === 503) {
+      throw new Error('Gemini API server sedang sibuk (status ' + response.status + '). Coba lagi.');
+    }
+    throw new Error(`Gemini API error ${response.status}: ${errBody.substring(0, 150)}`);
   }
 
   const result = await response.json();

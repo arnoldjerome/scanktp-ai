@@ -124,63 +124,69 @@ export default function App() {
     updateItemStatus(index, { status: 'processing', progress: 5, error: null });
 
     try {
-      // === STRATEGY 1: Use Gemini Vision API (if API key available) ===
+      // === STRATEGY 1: Gemini Vision API (primary) ===
       if (apiKey && apiKey.trim()) {
         try {
-          updateItemStatus(index, { progress: 20 });
+          updateItemStatus(index, { progress: 15 });
 
-          // Preprocess image for Gemini (color, upscaled, cropped left 78%)
-          let processedSource;
+          let imageSource;
           if (item.file) {
             if (item.file.type === 'application/pdf') {
               const pages = await convertPdfToImages(item.file);
               if (pages.length === 0) throw new Error('PDF kosong');
-              processedSource = pages[0]; // Already a data URL
+              imageSource = pages[0];
             } else {
-              // Preprocess: upscale + mild contrast + crop left 78%
-              processedSource = await preprocessImageForGemini(item.file);
+              // Send raw file directly to Gemini — Vision AI handles real photos natively
+              // No canvas preprocessing needed (it can break the image)
+              imageSource = item.file;
             }
           } else if (item.previewUrl) {
-            processedSource = item.previewUrl;
+            imageSource = item.previewUrl;
           } else {
             throw new Error('Tidak ada sumber gambar');
           }
 
-          updateItemStatus(index, { progress: 55 });
+          updateItemStatus(index, { progress: 40 });
+          const parsedData = await scanKTPWithGemini(imageSource, apiKey);
 
-          let parsedData = await scanKTPWithGemini(processedSource, apiKey);
+          // Retry with enhanced image if too many fields empty
+          const filledCount = Object.values(parsedData).filter(
+            v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
+          ).length;
 
-          // Retry if too many fields are empty (low quality image fallback)
-          const filledFields = Object.values(parsedData).filter(v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-').length;
-          if (filledFields < 4) {
-            console.log('Gemini returned incomplete data, retrying without crop...');
-            updateItemStatus(index, { progress: 65 });
-            // Retry with raw file (no crop) — sometimes crop removes text for non-standard KTPs
-            const rawSource = item.file || item.previewUrl;
-            parsedData = await scanKTPWithGemini(rawSource, apiKey);
+          if (filledCount < 5 && item.file && !item.file.type.includes('pdf')) {
+            console.log(`[Gemini] Only ${filledCount} fields filled, retrying with enhanced image...`);
+            updateItemStatus(index, { progress: 60 });
+            const enhanced = await preprocessImageForGemini(item.file);
+            const parsedData2 = await scanKTPWithGemini(enhanced, apiKey);
+            const filledCount2 = Object.values(parsedData2).filter(
+              v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
+            ).length;
+            // Use whichever result has more fields
+            if (filledCount2 > filledCount) {
+              updateItemStatus(index, { status: 'done', progress: 100, parsedData: parsedData2, engine: 'gemini' });
+              return;
+            }
           }
 
-          updateItemStatus(index, {
-            status: 'done',
-            progress: 100,
-            parsedData,
-            engine: 'gemini'
-          });
+          updateItemStatus(index, { status: 'done', progress: 100, parsedData, engine: 'gemini' });
           return;
 
         } catch (geminiErr) {
+          console.error('[Gemini Error]', geminiErr.message);
+
           if (geminiErr.message === 'API_KEY_INVALID') {
-            // Invalid key, prompt user to update
             updateItemStatus(index, {
-              status: 'error',
-              progress: 0,
-              error: 'API Key Gemini tidak valid. Klik "Set API Key" untuk memperbarui.',
+              status: 'error', progress: 0,
+              error: '❌ API Key Gemini tidak valid. Klik "Gemini Aktif" di header untuk memperbarui key.',
               engine: null
             });
             return;
           }
-          // Other Gemini errors → fallback to Tesseract
-          console.warn('Gemini failed, falling back to Tesseract:', geminiErr.message);
+
+          // Show Gemini error to user with fallback notification
+          const errMsg = geminiErr.message || 'Unknown error';
+          console.warn(`[Gemini] Gagal (${errMsg}), falling back to Tesseract...`);
           updateItemStatus(index, { progress: 30 });
         }
       }
