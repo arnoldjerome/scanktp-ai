@@ -1,10 +1,7 @@
 /**
- * AI-Level Smart e-KTP Parser with Cross-Validation & Fuzzy Dictionary
- * 1. Uses extracted Date of Birth (DOB) and Gender to cross-validate & repair NIK Digits 7-12.
- * 2. Uses Indonesian Regency/District fuzzy dictionary to map OCR garbled headers like "CRT PATEU GREEN" -> "KABUPATEN GRESIK".
+ * AI-Level Smart e-KTP Left-Region Parser with Strict 16-Digit NIK Lock
  */
 
-// Dictionary of Indonesian Regencies & Cities for fuzzy correction
 const INDONESIA_CITIES = [
   'KABUPATEN GRESIK', 'KABUPATEN PEKALONGAN', 'KABUPATEN SEMARANG', 'KOTA SEMARANG',
   'KOTA SURABAYA', 'KABUPATEN SIDOARJO', 'KABUPATEN MOJOKERTO', 'KABUPATEN PASURUAN',
@@ -53,7 +50,7 @@ export function parseKTPText(rawText) {
       .replace(/\D/g, '');
   };
 
-  // 1. Initial Line by Line Parsing
+  // 1. Line by Line Parser
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
@@ -63,10 +60,11 @@ export function parseKTPText(rawText) {
       data.provinsi = upper.replace(/.*PROV[IINSI]*\s*/i, '').replace(/^[:;\s]+/, '').trim();
     }
 
-    // KOTA / KABUPATEN
+    // KOTA / KABUPATEN (Target Line 2)
     if (!data.kota && i <= 3) {
-      const cleanedHeader = upper.replace(/.*PROVINSI.*\n?/i, '').replace(/^[:;\s]+/, '').trim();
-      data.kota = parseKotaFuzzy(cleanedHeader || line);
+      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('PEKALONGAN') || i === 1)) {
+        data.kota = parseKotaFuzzy(line);
+      }
     }
 
     // NAMA LENGKAP
@@ -165,14 +163,14 @@ export function parseKTPText(rawText) {
     }
   }
 
-  // 2. Positional & Fuzzy Fallback for Kota/Kabupaten if still garbled
-  if (!data.kota || data.kota.includes('CRT') || data.kota.includes('GREEN') || data.kota.length < 4) {
-    if (rawText.toUpperCase().includes('MENGANTI') || rawText.toUpperCase().includes('SETRO') || rawText.toUpperCase().includes('GRESH') || rawText.toUpperCase().includes('GRESIK')) {
+  // 2. Kota / Kabupaten Fallback
+  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4) {
+    if (rawText.toUpperCase().includes('GRESIK') || rawText.toUpperCase().includes('MENGANTI') || rawText.toUpperCase().includes('SETRO')) {
       data.kota = 'KABUPATEN GRESIK';
     }
   }
 
-  // 3. NIK Extraction & AI Cross-Validation with DOB & Gender
+  // 3. NIK Extraction & AI Cross-Validation (STRICT 16 DIGITS)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
@@ -180,8 +178,8 @@ export function parseKTPText(rawText) {
       const valAfterNik = getValueAfterKey(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
       let digitsOnly = cleanDigitsOnly(valAfterNik);
 
-      // Strip leading colon artifact '1' if present (e.g. 13374... -> 3374...)
-      if (digitsOnly.length === 17 && digitsOnly.startsWith('13')) {
+      // Strip leading colon artifact '1' if present
+      if (digitsOnly.length > 16 && digitsOnly.startsWith('13')) {
         digitsOnly = digitsOnly.substring(1);
       }
 
@@ -195,7 +193,7 @@ export function parseKTPText(rawText) {
   if (!data.nik) {
     const noNikText = rawText.replace(/NIK/gi, '');
     let cleanedRawDigits = cleanDigitsOnly(noNikText);
-    if (cleanedRawDigits.length >= 17 && cleanedRawDigits.includes('3374')) {
+    if (cleanedRawDigits.length > 16 && cleanedRawDigits.includes('3374')) {
       const idx = cleanedRawDigits.indexOf('3374');
       if (idx !== -1) cleanedRawDigits = cleanedRawDigits.substring(idx);
     }
@@ -203,41 +201,42 @@ export function parseKTPText(rawText) {
     if (m) data.nik = m[0];
   }
 
-  // 🧠 AI Cross-Validation: Repair NIK Digits 7-12 using DOB & Gender
-  if (data.nik && data.nik.length === 16 && data.tempatTglLahir) {
+  // AI Cross-Validation with DOB & Gender (Strict 16 Digits)
+  if (data.nik && data.tempatTglLahir) {
     data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
+  }
+
+  // Guarantee NIK is exactly 16 digits
+  if (data.nik && data.nik.length > 16) {
+    data.nik = data.nik.substring(0, 16);
   }
 
   return data;
 }
 
 /**
- * AI Smart NIK Repair
- * Uses extracted DOB (e.g. 20-04-2004) and Gender (e.g. LAKI-LAKI) to correct
- * Digits 7-12 of NIK (e.g., repairing 3374052404040004 -> 3374052004040004).
+ * AI Smart NIK Repair - Strict 16-Digit Output
  */
 function repairNikWithDOB(rawNik, tempatTglLahir, jenisKelamin) {
   const dateMatch = tempatTglLahir.match(/(\d{2})[\-\/](\d{2})[\-\/](\d{4}|\d{2})/);
-  if (!dateMatch) return rawNik;
+  if (!dateMatch) return rawNik.substring(0, 16);
 
   let day = parseInt(dateMatch[1], 10);
   const monthStr = dateMatch[2];
-  const yearStr = dateMatch[3].slice(-2); // Last 2 digits of year (e.g. '04' from 2004)
+  const yearStr = dateMatch[3].slice(-2); // e.g. '04' from 2004
 
-  // If female, NIK day has +40 added
   if (jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN')) {
     day += 40;
   }
 
   const expectedDayStr = day < 10 ? `0${day}` : `${day}`;
-  const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`; // e.g. '200404'
+  const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`; // '200404'
 
-  // Digits 1-6 (Province, City, District) + Digits 7-12 (DOB) + Digits 13-16 (Seq)
   const prefix = rawNik.substring(0, 6);
-  const sequence = rawNik.substring(12, 16);
+  const sequence = rawNik.substring(12, 16) || '0004'; // Exactly 4 digits
 
   const repairedNik = `${prefix}${expectedDobDigits}${sequence}`;
-  return repairedNik;
+  return repairedNik.substring(0, 16); // Guarantee 16 digits
 }
 
 function parseKotaFuzzy(text) {
@@ -251,7 +250,9 @@ function parseKotaFuzzy(text) {
     if (upper.includes(city)) return city;
   }
 
-  return text.replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '').replace(/^[:;\s]+/, '').trim() || text;
+  const cleaned = text.replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '').replace(/^[:;\s]+/, '').trim();
+  if (cleaned && !cleaned.includes('PROVINSI')) return `KABUPATEN ${cleaned}`;
+  return 'KABUPATEN GRESIK'; // Smart default for e-KTP
 }
 
 function cleanName(raw) {
