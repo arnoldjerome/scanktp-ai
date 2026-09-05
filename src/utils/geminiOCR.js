@@ -1,14 +1,22 @@
 /**
  * Gemini Vision OCR for e-KTP — Ultra Precision Edition
- * Uses Google Gemini 1.5 Flash with a highly engineered prompt to extract KTP data
- * with near-perfect accuracy. Includes NIK ↔ birth date cross-validation.
+ * Tries multiple Gemini models (newest first) for maximum compatibility.
+ * Uses v1 API (not v1beta) which has broader model support.
  */
 
-const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+// Try models in order — newest/most capable first
+const GEMINI_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro-latest',
+  'gemini-pro-vision', // older fallback
+];
 
-// ─── Prompt Engineering ──────────────────────────────────────────────────────
-// Extremely specific to Indonesian e-KTP layout. Reduces hallucination to near zero.
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1/models';
+
+// ─── Prompt Engineering ────────────────────────────────────────────────────────
 const KTP_PROMPT = `Kamu adalah mesin ekstraksi data e-KTP Indonesia yang sangat presisi.
 
 INSTRUKSI WAJIB:
@@ -39,7 +47,6 @@ VALIDASI MANDIRI sebelum output:
 - NIK harus tepat 16 digit angka
 - tempatTglLahir harus mengandung nama kota DAN tanggal, bukan hanya kota
 - berlakuHingga hanya boleh satu tanggal atau "SEUMUR HIDUP"
-- Setiap field harus dari barisnya sendiri, tidak boleh tercampur
 
 Output JSON (isi semua field, kosongkan jika tidak terbaca):
 {
@@ -61,8 +68,7 @@ Output JSON (isi semua field, kosongkan jika tidak terbaca):
   "berlakuHingga": ""
 }`;
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
+// ─── File to Base64 ────────────────────────────────────────────────────────────
 async function fileToBase64(fileOrUrl) {
   if (typeof fileOrUrl === 'string') {
     if (fileOrUrl.startsWith('data:')) {
@@ -95,14 +101,7 @@ function blobToBase64(blob) {
   });
 }
 
-// ─── Main OCR Function ────────────────────────────────────────────────────────
-
-/**
- * Scan a KTP image using Gemini Vision API
- * @param {File|Blob|string} imageSource
- * @param {string} apiKey
- * @returns {Promise<object>} Structured KTP data
- */
+// ─── Main OCR Function (tries multiple models) ────────────────────────────────
 export async function scanKTPWithGemini(imageSource, apiKey) {
   if (!apiKey || !apiKey.trim()) throw new Error('GEMINI_API_KEY_REQUIRED');
 
@@ -123,90 +122,104 @@ export async function scanKTPWithGemini(imageSource, apiKey) {
       },
     ],
     generationConfig: {
-      temperature: 0.05,   // Very low: minimal creativity, max precision
+      temperature: 0.05,
       maxOutputTokens: 1024,
       topP: 0.8,
       topK: 10,
     },
   };
 
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody),
-  });
+  let lastError = null;
 
-  if (!response.ok) {
-    let errBody = '';
-    try { errBody = await response.text(); } catch (_) {}
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      const url = `${GEMINI_BASE}/${modelName}:generateContent?key=${apiKey}`;
+      console.log(`[Gemini] Trying model: ${modelName}`);
 
-    console.error('[Gemini API Error]', response.status, errBody.substring(0, 300));
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
 
-    if (response.status === 400 && (errBody.includes('API_KEY_INVALID') || errBody.includes('invalid'))) {
-      throw new Error('API_KEY_INVALID');
+      if (!response.ok) {
+        let errBody = '';
+        try { errBody = await response.text(); } catch (_) {}
+        console.warn(`[Gemini] ${modelName} → HTTP ${response.status}:`, errBody.substring(0, 200));
+
+        // Auth errors — stop immediately, no point retrying
+        if (response.status === 403 ||
+            (response.status === 400 && (errBody.includes('API_KEY_INVALID') || errBody.includes('API key not valid')))) {
+          throw new Error('API_KEY_INVALID');
+        }
+        if (response.status === 429) {
+          throw new Error('Gemini quota habis. Tunggu 1 menit lalu coba lagi.');
+        }
+        // Model not found — try next
+        if (response.status === 404 || errBody.includes('not found') || errBody.includes('not supported')) {
+          lastError = new Error(`Model ${modelName} tidak tersedia`);
+          continue;
+        }
+        lastError = new Error(`HTTP ${response.status}: ${errBody.substring(0, 120)}`);
+        continue;
+      }
+
+      const result = await response.json();
+      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!text) {
+        lastError = new Error('Response kosong dari Gemini');
+        continue;
+      }
+
+      console.log(`[Gemini] ✓ Berhasil dengan model: ${modelName}`);
+
+      // Extract JSON
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        lastError = new Error('JSON tidak ditemukan dalam response Gemini');
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        lastError = new Error('JSON tidak valid: ' + e.message);
+        continue;
+      }
+
+      return normalizeAndValidate(parsed);
+
+    } catch (err) {
+      // Hard errors — don't retry
+      if (err.message === 'API_KEY_INVALID' ||
+          err.message.includes('quota') ||
+          err.message.includes('Tunggu')) {
+        throw err;
+      }
+      lastError = err;
+      console.warn(`[Gemini] ${modelName} threw:`, err.message);
     }
-    if (response.status === 429) {
-      throw new Error('Gemini API rate limit / quota habis. Coba lagi dalam 1 menit.');
-    }
-    if (response.status === 403) {
-      throw new Error('API_KEY_INVALID');
-    }
-    if (response.status === 500 || response.status === 503) {
-      throw new Error('Gemini API server sedang sibuk (status ' + response.status + '). Coba lagi.');
-    }
-    throw new Error(`Gemini API error ${response.status}: ${errBody.substring(0, 150)}`);
   }
 
-  const result = await response.json();
-  const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!text) throw new Error('Empty response from Gemini API');
-
-  // Extract JSON block robustly
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('No JSON found in Gemini response: ' + text.substring(0, 200));
-
-  let parsed;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    throw new Error('Invalid JSON from Gemini: ' + e.message);
-  }
-
-  return normalizeAndValidate(parsed);
+  throw lastError || new Error('Semua model Gemini gagal. Periksa API key Anda.');
 }
 
-// ─── Post-Processing & Validation ────────────────────────────────────────────
-
+// ─── Post-Processing & Validation ─────────────────────────────────────────────
 function normalizeAndValidate(raw) {
   const str = (v) => (typeof v === 'string' ? v.trim() : '');
 
-  // ── NIK ──────────────────────────────────────────────────────────────────
-  let nik = str(raw.nik).replace(/\s/g, '');
-  // Remove any non-digit characters that OCR might have added
-  nik = nik.replace(/[^0-9]/g, '');
+  let nik = str(raw.nik).replace(/\s/g, '').replace(/[^0-9]/g, '');
   if (nik.length > 16) nik = nik.substring(0, 16);
 
-  // ── Provinsi ─────────────────────────────────────────────────────────────
   let provinsi = str(raw.provinsi).toUpperCase();
-  if (provinsi && !provinsi.startsWith('PROVINSI')) {
-    provinsi = 'PROVINSI ' + provinsi;
-  }
-  // Remove double PROVINSI
+  if (provinsi && !provinsi.startsWith('PROVINSI')) provinsi = 'PROVINSI ' + provinsi;
   provinsi = provinsi.replace(/^PROVINSI\s+PROVINSI\s+/i, 'PROVINSI ');
 
-  // ── Kota ─────────────────────────────────────────────────────────────────
-  let kota = str(raw.kota).toUpperCase();
-  // Remove stray characters
-  kota = kota.replace(/[|\\]/g, '').trim();
+  let kota = str(raw.kota).toUpperCase().replace(/[|\\]/g, '').trim();
 
-  // ── Tempat/Tgl Lahir ─────────────────────────────────────────────────────
-  let tempatTglLahir = str(raw.tempatTglLahir);
-  // Remove "WNI" contamination
-  tempatTglLahir = tempatTglLahir.replace(/^WNI\s*/i, '').trim();
-  // Normalize date separators
-  tempatTglLahir = tempatTglLahir.replace(/[\/\.]/g, '-');
-  // Ensure format: "CITY, DD-MM-YYYY"
+  let tempatTglLahir = str(raw.tempatTglLahir).replace(/^WNI\s*/i, '').replace(/[\/\.]/g, '-').trim();
   const tglMatch = tempatTglLahir.match(/(\d{1,2})-(\d{1,2})-(\d{2,4})/);
   if (tglMatch) {
     const day = tglMatch[1].padStart(2, '0');
@@ -216,74 +229,46 @@ function normalizeAndValidate(raw) {
     tempatTglLahir = cityPart ? `${cityPart}, ${day}-${month}-${year}` : `${day}-${month}-${year}`;
   }
 
-  // ── Jenis Kelamin ─────────────────────────────────────────────────────────
   let jenisKelamin = str(raw.jenisKelamin).toUpperCase();
   if (jenisKelamin.includes('PEREMPUAN')) jenisKelamin = 'PEREMPUAN';
   else if (jenisKelamin.includes('LAKI')) jenisKelamin = 'LAKI-LAKI';
 
-  // ── Gol Darah ─────────────────────────────────────────────────────────────
   let golDarah = str(raw.golDarah).toUpperCase().trim() || '-';
-  // Only valid values
   if (!['A', 'B', 'AB', 'O'].includes(golDarah)) {
-    const match = golDarah.match(/\b(A|B|AB|O)\b/);
-    golDarah = match ? match[1] : '-';
+    const m = golDarah.match(/\b(A|B|AB|O)\b/);
+    golDarah = m ? m[1] : '-';
   }
 
-  // ── RT/RW ─────────────────────────────────────────────────────────────────
-  let rtRw = str(raw.rtRw).replace(/\s/g, '');
-  // Normalize slash
-  rtRw = rtRw.replace(/[\\|]/g, '/');
-  // Ensure 3-digit padding on both sides
-  const rtRwMatch = rtRw.match(/(\d+)[\/](\d+)/);
-  if (rtRwMatch) {
-    rtRw = rtRwMatch[1].padStart(3, '0') + '/' + rtRwMatch[2].padStart(3, '0');
-  }
+  let rtRw = str(raw.rtRw).replace(/\s/g, '').replace(/[\\|]/g, '/');
+  const rtRwMatch = rtRw.match(/(\d+)\/(\d+)/);
+  if (rtRwMatch) rtRw = rtRwMatch[1].padStart(3, '0') + '/' + rtRwMatch[2].padStart(3, '0');
 
-  // ── Berlaku Hingga ────────────────────────────────────────────────────────
   let berlakuHingga = str(raw.berlakuHingga).toUpperCase();
   if (berlakuHingga.includes('SEUMUR')) {
     berlakuHingga = 'SEUMUR HIDUP';
   } else {
-    // Extract only the FIRST valid date, discard any duplicated dates
-    const dateMatches = berlakuHingga.match(/\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4}/g);
-    if (dateMatches && dateMatches.length > 0) {
-      const firstDate = dateMatches[0].replace(/[\/\.]/g, '-');
-      const parts = firstDate.split('-');
-      if (parts.length === 3) {
-        berlakuHingga = parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0') + '-' + parts[2];
-      } else {
-        berlakuHingga = firstDate;
-      }
+    const dates = berlakuHingga.match(/\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4}/g);
+    if (dates && dates.length > 0) {
+      const parts = dates[0].replace(/[\/\.]/g, '-').split('-');
+      berlakuHingga = parts.length === 3
+        ? parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0') + '-' + parts[2]
+        : dates[0];
     }
   }
 
-  // ── Alamat ────────────────────────────────────────────────────────────────
-  let alamat = str(raw.alamat).toUpperCase();
-  // Remove trailing pipe or backslash
-  alamat = alamat.replace(/[|\\]+$/, '').trim();
+  let alamat = str(raw.alamat).toUpperCase().replace(/[|\\]+$/, '').trim();
+  let pekerjaan = str(raw.pekerjaan).toUpperCase().replace(/[|\\]/g, '').trim();
 
-  // ── Pekerjaan ─────────────────────────────────────────────────────────────
-  let pekerjaan = str(raw.pekerjaan).toUpperCase();
-  // Remove stray characters
-  pekerjaan = pekerjaan.replace(/[|\\]/g, '').trim();
-
-  // ── NIK Cross-Validation with Birth Date ─────────────────────────────────
-  // Indonesian NIK structure: [2-digit prov][2-digit city][2-digit kec][2-digit day][2-digit month][2-digit year][4-digit seq]
-  // If NIK length is 16, validate day/month against birth date
+  // NIK cross-validation with birth date
   if (nik.length === 16 && tempatTglLahir) {
     nik = crossValidateNIK(nik, tempatTglLahir, jenisKelamin);
   }
 
   return {
-    provinsi,
-    kota,
-    nik,
+    provinsi, kota, nik,
     nama: str(raw.nama).toUpperCase(),
-    tempatTglLahir,
-    jenisKelamin,
-    golDarah,
-    alamat,
-    rtRw,
+    tempatTglLahir, jenisKelamin, golDarah,
+    alamat, rtRw,
     kelDesa: str(raw.kelDesa).toUpperCase(),
     kecamatan: str(raw.kecamatan).toUpperCase(),
     agama: str(raw.agama).toUpperCase(),
@@ -295,39 +280,21 @@ function normalizeAndValidate(raw) {
   };
 }
 
-/**
- * Cross-validate NIK digits 7-12 against birth date from KTP text.
- * NIK format: [prov:2][city:2][kec:2][day:2][month:2][year:2][seq:4]
- * For PEREMPUAN, day += 40
- */
 function crossValidateNIK(nik, tempatTglLahir, jenisKelamin) {
   const dateMatch = tempatTglLahir.match(/(\d{2})-(\d{2})-(\d{2,4})/);
   if (!dateMatch) return nik;
-
   let day = parseInt(dateMatch[1], 10);
-  const month = dateMatch[2]; // 2-digit string e.g. "04"
-  const year = dateMatch[3].slice(-2); // last 2 digits
-
-  const isPerempuan = jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN');
-  if (isPerempuan) day += 40;
-
+  const month = dateMatch[2];
+  const year = dateMatch[3].slice(-2);
+  if (jenisKelamin && jenisKelamin.includes('PEREMPUAN')) day += 40;
   const expectedDay = day < 10 ? `0${day}` : `${day}`;
-  const expectedDob = expectedDay + month + year; // 6 chars
-
-  const nikPrefix = nik.substring(0, 6);   // region code
-  const nikDob    = nik.substring(6, 12);  // date digits in NIK
-  const nikSeq    = nik.substring(12, 16); // sequence
-
-  // If the DOB portion differs from expected, patch it
-  // Only patch if expected looks valid
-  if (
-    expectedDob.length === 6 &&
-    /^\d{6}$/.test(expectedDob) &&
-    nikDob !== expectedDob
-  ) {
-    console.log(`NIK DOB mismatch: NIK says "${nikDob}", expected "${expectedDob}" — patching.`);
-    return nikPrefix + expectedDob + nikSeq;
+  const expectedDob = expectedDay + month + year;
+  const prefix = nik.substring(0, 6);
+  const nikDob = nik.substring(6, 12);
+  const seq = nik.substring(12, 16);
+  if (/^\d{6}$/.test(expectedDob) && nikDob !== expectedDob) {
+    console.log(`[NIK Repair] ${nikDob} → ${expectedDob}`);
+    return prefix + expectedDob + seq;
   }
-
   return nik;
 }

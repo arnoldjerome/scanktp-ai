@@ -12,36 +12,51 @@ export default function ApiKeyModal({ apiKey, onSave, onClose }) {
 
   const handleTest = async () => {
     const key = inputVal.trim();
-    if (!key) {
-      setErrMsg('Masukkan API Key terlebih dahulu');
-      setStatus('error');
-      return;
-    }
+    if (!key) { setErrMsg('Masukkan API Key terlebih dahulu'); setStatus('error'); return; }
     setStatus('testing');
     setErrMsg('');
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Hi' }] }],
-            generationConfig: { maxOutputTokens: 5 }
-          })
+
+    const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
+    let lastErr = '';
+
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${key}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'Balas dengan kata: OK' }] }],
+              generationConfig: { maxOutputTokens: 5 }
+            })
+          }
+        );
+        if (res.ok) {
+          setStatus('ok');
+          setErrMsg(`Terhubung dengan model: ${model}`);
+          return;
         }
-      );
-      if (res.ok) {
-        setStatus('ok');
-      } else {
-        const err = await res.json();
-        setStatus('error');
-        setErrMsg(err?.error?.message || `Status ${res.status} - API Key tidak valid`);
+        const err = await res.json().catch(() => ({}));
+        const msg = err?.error?.message || `Status ${res.status}`;
+        if (res.status === 403 || res.status === 401 || msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
+          setStatus('error');
+          setErrMsg('API Key tidak valid. Pastikan key dari aistudio.google.com (diawali AIza...)');
+          return;
+        }
+        if (res.status === 429) {
+          setStatus('error');
+          setErrMsg('Quota API habis. Tunggu 1 menit lalu coba lagi.');
+          return;
+        }
+        lastErr = msg;
+        // 404 = model not found, try next
+      } catch (e) {
+        lastErr = e.message;
       }
-    } catch (e) {
-      setStatus('error');
-      setErrMsg(e.message || 'Gagal koneksi ke Gemini API');
     }
+    setStatus('error');
+    setErrMsg(lastErr || 'Gagal terhubung ke Gemini API');
   };
 
   const handleSave = () => {
