@@ -5,7 +5,7 @@ import UploadZone from './components/UploadZone';
 import FileList from './components/FileList';
 import ResultPanel from './components/ResultPanel';
 import ApiKeyModal from './components/ApiKeyModal';
-import { preprocessImageForOCR } from './utils/imageProcessor';
+import { preprocessImageForOCR, preprocessImageForGemini } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
 import { parseKTPText } from './utils/ktpParser';
 import { scanKTPWithGemini } from './utils/geminiOCR';
@@ -129,25 +129,36 @@ export default function App() {
         try {
           updateItemStatus(index, { progress: 20 });
 
-          let imageSource;
+          // Preprocess image for Gemini (color, upscaled, cropped left 78%)
+          let processedSource;
           if (item.file) {
             if (item.file.type === 'application/pdf') {
-              // For PDF: convert first page to image
               const pages = await convertPdfToImages(item.file);
               if (pages.length === 0) throw new Error('PDF kosong');
-              imageSource = pages[0]; // Use first page as data URL
+              processedSource = pages[0]; // Already a data URL
             } else {
-              imageSource = item.file;
+              // Preprocess: upscale + mild contrast + crop left 78%
+              processedSource = await preprocessImageForGemini(item.file);
             }
           } else if (item.previewUrl) {
-            imageSource = item.previewUrl;
+            processedSource = item.previewUrl;
           } else {
             throw new Error('Tidak ada sumber gambar');
           }
 
-          updateItemStatus(index, { progress: 40 });
+          updateItemStatus(index, { progress: 55 });
 
-          const parsedData = await scanKTPWithGemini(imageSource, apiKey);
+          let parsedData = await scanKTPWithGemini(processedSource, apiKey);
+
+          // Retry if too many fields are empty (low quality image fallback)
+          const filledFields = Object.values(parsedData).filter(v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-').length;
+          if (filledFields < 4) {
+            console.log('Gemini returned incomplete data, retrying without crop...');
+            updateItemStatus(index, { progress: 65 });
+            // Retry with raw file (no crop) — sometimes crop removes text for non-standard KTPs
+            const rawSource = item.file || item.previewUrl;
+            parsedData = await scanKTPWithGemini(rawSource, apiKey);
+          }
 
           updateItemStatus(index, {
             status: 'done',

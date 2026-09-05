@@ -1,87 +1,17 @@
 /**
- * e-KTP Image Preprocessor for Tesseract OCR
- * - Crops left 75% (text area only, excludes face photo)
- * - Upscales to min 2000px wide for better OCR character recognition
- * - Applies adaptive contrast normalization
- * - Converts to high-contrast grayscale optimized for dark text on light background
+ * e-KTP Image Preprocessors
+ * Two strategies:
+ * 1. preprocessImageForOCR   → Tesseract: grayscale + binarize + high-contrast
+ * 2. preprocessImageForGemini → Gemini AI: keep color + mild contrast + crop
  */
 
-export async function preprocessImageForOCR(fileOrUrl) {
+// ─── Shared helper ────────────────────────────────────────────────────────────
+function loadImage(fileOrUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'Anonymous';
-
-    img.onload = () => {
-      try {
-        // ── Step 1: Upscale to minimum 2400px width ─────────────────────────
-        const targetWidth = Math.max(2400, img.width * 2);
-        const scale = targetWidth / img.width;
-        const width = targetWidth;
-        const height = Math.round(img.height * scale);
-
-        const fullCanvas = document.createElement('canvas');
-        fullCanvas.width = width;
-        fullCanvas.height = height;
-        const fullCtx = fullCanvas.getContext('2d');
-        fullCtx.imageSmoothingEnabled = true;
-        fullCtx.imageSmoothingQuality = 'high';
-        fullCtx.drawImage(img, 0, 0, width, height);
-
-        // ── Step 2: Crop left 75% (text column, exclude face photo) ─────────
-        const cropWidth = Math.round(width * 0.75);
-        const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = cropWidth;
-        cropCanvas.height = height;
-        const cropCtx = cropCanvas.getContext('2d');
-        cropCtx.drawImage(fullCanvas, 0, 0, cropWidth, height, 0, 0, cropWidth, height);
-
-        // ── Step 3: Adaptive grayscale + high contrast ───────────────────────
-        const imageData = cropCtx.getImageData(0, 0, cropWidth, height);
-        const data = imageData.data;
-        const totalPx = cropWidth * height;
-
-        // Convert to grayscale — weight red channel higher (works well for blue KTPs)
-        const gray = new Float32Array(totalPx);
-        for (let i = 0; i < data.length; i += 4) {
-          const r = data[i], g = data[i + 1], b = data[i + 2];
-          // For teal/blue-background KTPs: reduce blue channel weight
-          gray[i / 4] = 0.6 * r + 0.3 * g + 0.1 * b;
-        }
-
-        // Find 5th and 95th percentile for adaptive normalization
-        const sorted = [...gray].sort((a, b) => a - b);
-        const p5  = sorted[Math.floor(totalPx * 0.05)];
-        const p95 = sorted[Math.floor(totalPx * 0.95)];
-        const range = Math.max(p95 - p5, 1);
-
-        // Apply normalization + binarization threshold
-        for (let i = 0; i < data.length; i += 4) {
-          const idx = i / 4;
-          // Normalize to 0-255
-          let val = Math.round(((gray[idx] - p5) / range) * 255);
-          val = Math.max(0, Math.min(255, val));
-
-          // Binarize: dark pixels → black, light pixels → white
-          // Threshold at 160 — text is typically darker than background
-          const binary = val < 160 ? Math.max(0, val - 20) : Math.min(255, val + 30);
-
-          data[i] = data[i + 1] = data[i + 2] = binary;
-        }
-
-        cropCtx.putImageData(imageData, 0, 0);
-
-        // ── Step 4: Output high-quality PNG ──────────────────────────────────
-        resolve(cropCanvas.toDataURL('image/png'));
-
-      } catch (err) {
-        console.warn('Image preprocessing fallback:', err);
-        // Fallback: return original image
-        resolve(typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl));
-      }
-    };
-
-    img.onerror = (err) => reject(new Error('Failed to load image: ' + err));
-
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load image'));
     if (typeof fileOrUrl === 'string') {
       img.src = fileOrUrl;
     } else if (fileOrUrl instanceof File || fileOrUrl instanceof Blob) {
@@ -90,4 +20,130 @@ export async function preprocessImageForOCR(fileOrUrl) {
       reject(new Error('Invalid input: expected File, Blob, or URL string'));
     }
   });
+}
+
+// ─── 1. Tesseract OCR Preprocessor ───────────────────────────────────────────
+/**
+ * Prepares KTP image for Tesseract OCR:
+ * - Upscale to 2400px
+ * - Crop left 75% (text column, no face photo)
+ * - Convert to high-contrast grayscale + binarize
+ */
+export async function preprocessImageForOCR(fileOrUrl) {
+  try {
+    const img = await loadImage(fileOrUrl);
+
+    // Upscale to min 2400px
+    const targetWidth = Math.max(2400, img.width * 2);
+    const scale = targetWidth / img.width;
+    const width = targetWidth;
+    const height = Math.round(img.height * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, width, height);
+
+    // Crop to left 75%
+    const cropW = Math.round(width * 0.75);
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropW;
+    cropCanvas.height = height;
+    const cropCtx = cropCanvas.getContext('2d');
+    cropCtx.drawImage(canvas, 0, 0, cropW, height, 0, 0, cropW, height);
+
+    // Grayscale + adaptive binarization (optimized for blue KTP background)
+    const imageData = cropCtx.getImageData(0, 0, cropW, height);
+    const data = imageData.data;
+    const totalPx = cropW * height;
+
+    const gray = new Float32Array(totalPx);
+    for (let i = 0; i < data.length; i += 4) {
+      // Reduce blue channel weight → text stands out better on teal background
+      gray[i / 4] = 0.6 * data[i] + 0.3 * data[i + 1] + 0.1 * data[i + 2];
+    }
+
+    // Adaptive normalization using 5th–95th percentile
+    const sorted = [...gray].sort((a, b) => a - b);
+    const p5  = sorted[Math.floor(totalPx * 0.05)];
+    const p95 = sorted[Math.floor(totalPx * 0.95)];
+    const range = Math.max(p95 - p5, 1);
+
+    for (let i = 0; i < data.length; i += 4) {
+      let val = Math.round(((gray[i / 4] - p5) / range) * 255);
+      val = Math.max(0, Math.min(255, val));
+      const binary = val < 160 ? Math.max(0, val - 20) : Math.min(255, val + 30);
+      data[i] = data[i + 1] = data[i + 2] = binary;
+    }
+
+    cropCtx.putImageData(imageData, 0, 0);
+    return cropCanvas.toDataURL('image/png');
+
+  } catch (err) {
+    console.warn('OCR preprocessing fallback:', err);
+    return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
+  }
+}
+
+// ─── 2. Gemini Vision Preprocessor ───────────────────────────────────────────
+/**
+ * Prepares KTP image for Gemini Vision AI:
+ * - Keep COLOR (Gemini reads color images better than grayscale)
+ * - Upscale to min 1800px
+ * - Mild contrast enhancement (not aggressive binarization)
+ * - Crop left 78% to remove face photo + signature area
+ * - Output JPEG quality 90 for efficient API transfer
+ */
+export async function preprocessImageForGemini(fileOrUrl) {
+  try {
+    const img = await loadImage(fileOrUrl);
+
+    // Upscale to min 1800px
+    const targetWidth = Math.max(1800, img.width);
+    const scale = targetWidth / img.width;
+    const width = targetWidth;
+    const height = Math.round(img.height * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, width, height);
+
+    // Crop to left 78% — removes face photo & signature, keeps all text
+    const cropW = Math.round(width * 0.78);
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropW;
+    cropCanvas.height = height;
+    const cropCtx = cropCanvas.getContext('2d');
+    cropCtx.drawImage(canvas, 0, 0, cropW, height, 0, 0, cropW, height);
+
+    // Mild contrast boost — keep color for Gemini Vision
+    const imageData = cropCtx.getImageData(0, 0, cropW, height);
+    const data = imageData.data;
+    const CONTRAST = 1.35; // Mild boost — enough to make text clearer
+    const MIDPOINT = 128;
+
+    for (let i = 0; i < data.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        let v = data[i + c];
+        v = Math.round(MIDPOINT + (v - MIDPOINT) * CONTRAST);
+        data[i + c] = Math.max(0, Math.min(255, v));
+      }
+    }
+
+    cropCtx.putImageData(imageData, 0, 0);
+
+    // JPEG quality 90 — good quality, manageable file size for API
+    return cropCanvas.toDataURL('image/jpeg', 0.90);
+
+  } catch (err) {
+    console.warn('Gemini preprocessing fallback:', err);
+    return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
+  }
 }
