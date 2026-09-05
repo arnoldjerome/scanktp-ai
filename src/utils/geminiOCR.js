@@ -231,19 +231,29 @@ export async function testGeminiConnection(apiKey) {
 // ─── Core Gemini call ─────────────────────────────────────────────────────────
 async function callGemini({ apiVersion, modelName, apiKey, parts, useSchema = false, temperature = 0.0 }) {
   const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent?key=${apiKey}`;
+
+  // Prepend system instruction to contents so it works on both v1 and v1beta
+  const allParts = [
+    { text: `[INSTRUCTION]\n${SYSTEM_INSTRUCTION}\n` },
+    ...parts
+  ];
+
+  const genConfig = {
+    temperature,
+    maxOutputTokens: 2048,
+    topP: 0.9,
+    topK: 32,
+  };
+
+  // responseMimeType is camelCase in Google REST API
+  if (useSchema && apiVersion === 'v1beta') {
+    genConfig.responseMimeType = 'application/json';
+    genConfig.responseSchema = KTP_RESPONSE_SCHEMA;
+  }
+
   const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: [{ parts }],
-    generationConfig: {
-      temperature,
-      maxOutputTokens: 2048,
-      topP: 0.9,
-      topK: 32,
-      ...(useSchema ? {
-        response_mime_type: 'application/json',
-        responseSchema: KTP_RESPONSE_SCHEMA,
-      } : {}),
-    },
+    contents: [{ parts: allParts }],
+    generationConfig: genConfig,
     safetySettings: [
       { category: 'HARM_CATEGORY_HARASSMENT',       threshold: 'BLOCK_NONE' },
       { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },

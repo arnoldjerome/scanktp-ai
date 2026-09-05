@@ -2,7 +2,7 @@
  * Indonesian e-KTP Text Parser — Improved Fallback for Tesseract OCR
  * Used when Gemini API is unavailable. More robust regex + validation.
  */
-import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData';
+import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData.js';
 
 export function parseKTPText(rawText) {
   if (!rawText) return getDefaultKTPData();
@@ -55,9 +55,9 @@ export function parseKTPText(rawText) {
       }
     }
 
-    // NIK — look for explicit NIK label first
-    if ((upper.includes('NIK') || upper.match(/^N[I1]K/)) && !data.nik) {
-      const val = getValueAfterLabel(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
+    // NIK — look for explicit NIK/NIX label first
+    if ((upper.includes('NIK') || upper.includes('NIX') || upper.match(/^N[I1!|]?[KX]/i)) && !data.nik) {
+      const val = getValueAfterLabel(line, ['NIK', 'NIX', 'N1K', 'NI K', 'N.I.K', 'N!K']);
       const digits = extractDigits(val);
       if (digits.length >= 15) {
         data.nik = digits.substring(0, 16);
@@ -65,7 +65,7 @@ export function parseKTPText(rawText) {
     }
 
     // NAMA
-    if (upper.match(/^NAMA\b/) || upper.match(/NAMA\s*:/)) {
+    if (upper.match(/^NAMA\b/) || upper.match(/NAMA\s*:/) || upper.match(/^N[A4]M[A4]/i)) {
       if (!upper.includes('AGAMA') && !upper.includes('NEGARA') && !upper.includes('KEWARGANEGARAAN')) {
         const val = getValueAfterLabel(line, ['NAMA']);
         if (val && val.length > 2) data.nama = cleanName(val);
@@ -86,15 +86,19 @@ export function parseKTPText(rawText) {
       if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
       else if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
 
-      const golMatch = line.match(/\b(AB|A|B|O)\b/i);
-      if (golMatch && (upper.includes('GOL') || upper.includes('DARAH') || i <= lines.length - 1)) {
+      const golMatch = line.match(/(?:GOL(?:\.|\s)*DARAH\s*:?[\s\d]*)([ABO]+)\b/i) ||
+                       line.match(/\d([ABO])\b/i) ||
+                       line.match(/\b(AB|A|B|O)\b/i);
+      if (golMatch) {
         data.golDarah = golMatch[1].toUpperCase();
       }
     }
 
     // GOL DARAH (standalone or on same line as kelamin)
     if ((upper.includes('GOL') || upper.includes('DARAH')) && !data.golDarah) {
-      const golMatch = line.match(/\b(AB|A|B|O)\b/i);
+      const golMatch = line.match(/(?:GOL(?:\.|\s)*DARAH\s*:?[\s\d]*)([ABO]+)\b/i) ||
+                       line.match(/\d([ABO])\b/i) ||
+                       line.match(/\b(AB|A|B|O)\b/i);
       if (golMatch) data.golDarah = golMatch[1].toUpperCase();
     }
 
@@ -102,11 +106,13 @@ export function parseKTPText(rawText) {
     if ((upper.match(/^ALAMAT\b/) || upper.match(/ALAMAT\s*:/)) &&
         !upper.includes('RT') && !upper.includes('KEL') && !upper.includes('KEC')) {
       const val = getValueAfterLabel(line, ['ALAMAT']);
-      if (val && val.length > 2) data.alamat = val.toUpperCase();
+      if (val && val.length > 2) {
+        data.alamat = val.replace(/\bDUEUN\b/i, 'DUSUN').toUpperCase();
+      }
     }
 
     // RT / RW — pattern: digits/digits
-    if (!data.rtRw && (upper.match(/\bRT\b/) || upper.match(/\bRW\b/) || upper.match(/\d{2,3}\s*\/\s*\d{2,3}/))) {
+    if (!data.rtRw && (upper.match(/\bRT\b/) || upper.match(/\bRW\b/) || upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/))) {
       const rtMatch = line.match(/(\d{1,3})\s*[\/\\]\s*(\d{1,3})/);
       if (rtMatch) {
         const rt = rtMatch[1].padStart(3, '0');
@@ -154,10 +160,10 @@ export function parseKTPText(rawText) {
     if (upper.match(/^PEKERJAAN\b/) || upper.match(/PEKERJAAN\s*:/)) {
       const val = getValueAfterLabel(line, ['PEKERJAAN']);
       if (val) {
-        // Remove any trailing location or date that might bleed in
         data.pekerjaan = val
           .replace(/\s*(?:WNI|WNA)\s*$/i, '')
           .replace(/\s*\d{2}[-\/]\d{2}[-\/]\d{4}.*$/, '')
+          .replace(/\s+(?:GRESIK|JAKARTA|SURABAYA|SEMARANG|BANDUNG|SIDOARJO)\b.*$/i, '')
           .toUpperCase()
           .trim();
       }
@@ -221,7 +227,16 @@ export function parseKTPText(rawText) {
  */
 function extractDigits(str) {
   if (!str) return '';
-  return str.replace(/\D/g, '');
+  return str
+    .replace(/[Oo]/g, '0')
+    .replace(/[lIi|!]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[AaYy]/g, '4')
+    .replace(/[Ss]/g, '5')
+    .replace(/[b]/g, '6')
+    .replace(/[B]/g, '8')
+    .replace(/[gq]/g, '9')
+    .replace(/\D/g, '');
 }
 
 /**

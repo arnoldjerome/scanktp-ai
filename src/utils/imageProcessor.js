@@ -25,16 +25,21 @@ function loadImage(fileOrUrl) {
 // ─── 1. Tesseract OCR Preprocessor ───────────────────────────────────────────
 /**
  * Prepares KTP image for Tesseract OCR:
- * - Upscale to 2400px
- * - Crop left 75% (text column, no face photo)
- * - Convert to high-contrast grayscale + binarize
+ * Preserves natural image colors and text sharpness.
+ * Hard binarization is avoided because Tesseract 5 LSTM neural net works
+ * significantly better on original natural colors.
  */
 export async function preprocessImageForOCR(fileOrUrl) {
   try {
     const img = await loadImage(fileOrUrl);
 
-    // Upscale to min 2400px
-    const targetWidth = Math.max(2400, img.width * 2);
+    // If image is already good resolution (width >= 1200), return as-is
+    if (img.width >= 1200 && img.width <= 3000) {
+      return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
+    }
+
+    // Upscale smaller images for better character recognition
+    const targetWidth = Math.min(Math.max(1600, img.width * 2), 2400);
     const scale = targetWidth / img.width;
     const width = targetWidth;
     const height = Math.round(img.height * scale);
@@ -47,41 +52,7 @@ export async function preprocessImageForOCR(fileOrUrl) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, width, height);
 
-    // Crop to left 75%
-    const cropW = Math.round(width * 0.75);
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropW;
-    cropCanvas.height = height;
-    const cropCtx = cropCanvas.getContext('2d');
-    cropCtx.drawImage(canvas, 0, 0, cropW, height, 0, 0, cropW, height);
-
-    // Grayscale + adaptive binarization (optimized for blue KTP background)
-    const imageData = cropCtx.getImageData(0, 0, cropW, height);
-    const data = imageData.data;
-    const totalPx = cropW * height;
-
-    const gray = new Float32Array(totalPx);
-    for (let i = 0; i < data.length; i += 4) {
-      // Reduce blue channel weight → text stands out better on teal background
-      gray[i / 4] = 0.6 * data[i] + 0.3 * data[i + 1] + 0.1 * data[i + 2];
-    }
-
-    // Adaptive normalization using 5th–95th percentile
-    const sorted = [...gray].sort((a, b) => a - b);
-    const p5  = sorted[Math.floor(totalPx * 0.05)];
-    const p95 = sorted[Math.floor(totalPx * 0.95)];
-    const range = Math.max(p95 - p5, 1);
-
-    for (let i = 0; i < data.length; i += 4) {
-      let val = Math.round(((gray[i / 4] - p5) / range) * 255);
-      val = Math.max(0, Math.min(255, val));
-      const binary = val < 160 ? Math.max(0, val - 20) : Math.min(255, val + 30);
-      data[i] = data[i + 1] = data[i + 2] = binary;
-    }
-
-    cropCtx.putImageData(imageData, 0, 0);
-    return cropCanvas.toDataURL('image/png');
-
+    return canvas.toDataURL('image/jpeg', 0.95);
   } catch (err) {
     console.warn('OCR preprocessing fallback:', err);
     return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
