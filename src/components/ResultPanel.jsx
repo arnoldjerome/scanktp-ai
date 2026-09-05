@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, FileText, Table, Sparkles, Layers, Edit3, ShieldAlert, CheckCircle2 } from 'lucide-react';
+import { Copy, Check, FileText, Table, Sparkles, Layers, Edit3, ShieldAlert, CheckCircle2, Zap, Bot } from 'lucide-react';
 import { formatKTPForClipboard, formatAllKTPsForClipboard } from '../utils/ktpParser';
 
 export default function ResultPanel({
@@ -89,6 +89,18 @@ export default function ResultPanel({
             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
               {doneCount}/{items.length} Selesai
             </span>
+            {currentItem?.engine === 'gemini' && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center space-x-1">
+                <Bot className="w-2.5 h-2.5" />
+                <span>Gemini AI</span>
+              </span>
+            )}
+            {currentItem?.engine === 'tesseract' && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center space-x-1">
+                <Zap className="w-2.5 h-2.5" />
+                <span>Tesseract OCR</span>
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-400">
             Review & edit hasil scan di tabel bawah sebelum menyalin ke clipboard
@@ -185,9 +197,14 @@ export default function ResultPanel({
 
           {currentItem.status === 'processing' && (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-              <div className="w-12 h-12 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin mb-3" />
-              <p className="text-sm font-semibold text-cyan-300">Menganalisis & Mengindeks KTP...</p>
-              <p className="text-xs text-slate-400 mt-1">Ekstraksi teks dengan kecerdasan OCR ({currentItem.progress || 0}%)</p>
+              <div className="relative w-14 h-14 mb-4">
+                <div className="w-14 h-14 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Bot className="w-5 h-5 text-indigo-400" />
+                </div>
+              </div>
+              <p className="text-sm font-semibold text-cyan-300">Gemini AI sedang membaca KTP...</p>
+              <p className="text-xs text-slate-400 mt-1">Menganalisa setiap detail dengan kecerdasan AI ({currentItem.progress || 0}%)</p>
             </div>
           )}
 

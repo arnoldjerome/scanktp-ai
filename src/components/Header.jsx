@@ -1,54 +1,70 @@
 import React from 'react';
-import { Scan, Sparkles, Zap, ShieldCheck, FileText } from 'lucide-react';
+import { Scan, Sparkles, Zap, ShieldCheck, FileText, Key, CheckCircle } from 'lucide-react';
 
-export default function Header({ onLoadSample, fileCount }) {
+export default function Header({ onLoadSample, fileCount, hasApiKey, onOpenApiKey }) {
   return (
     <header className="sticky top-0 z-50 glass-panel border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
         
-        {/* Brand Logo */}
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-400 p-[1px] shadow-glow-brand flex items-center justify-center">
-            <div className="w-full h-full bg-slate-950 rounded-[11px] flex items-center justify-center">
-              <Scan className="w-5 h-5 text-cyan-400 animate-pulse" />
-            </div>
+        {/* Brand */}
+        <div className="flex items-center space-x-2.5">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+            <Scan className="w-4 h-4 text-white" />
           </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h1 className="text-lg font-bold tracking-tight bg-gradient-to-r from-white via-slate-100 to-indigo-200 bg-clip-text text-transparent">
-                ScanKTP<span className="text-cyan-400">.ai</span>
-              </h1>
-              <span className="px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                PRO OCR
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 hidden sm:block">
-              Convert Foto & PDF KTP ke Tabel Data • Fitur Salin Clipboard Instan
-            </p>
+          <div className="flex items-center space-x-2">
+            <span className="font-bold text-white text-sm tracking-tight">ScanKTP</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 font-semibold">AI</span>
           </div>
         </div>
 
-        {/* Header Actions */}
-        <div className="flex items-center space-x-3">
+        {/* Center badges */}
+        <div className="hidden md:flex items-center space-x-4 text-xs text-slate-400">
+          <span className="flex items-center space-x-1">
+            <Sparkles className="w-3 h-3 text-indigo-400" />
+            <span>Gemini Vision OCR</span>
+          </span>
+          <span className="w-1 h-1 rounded-full bg-slate-700" />
+          <span className="flex items-center space-x-1">
+            <ShieldCheck className="w-3 h-3 text-emerald-400" />
+            <span>100% Client-Side</span>
+          </span>
+          <span className="w-1 h-1 rounded-full bg-slate-700" />
+          <span className="flex items-center space-x-1">
+            <FileText className="w-3 h-3 text-cyan-400" />
+            <span>Max {fileCount}/10 File</span>
+          </span>
+        </div>
+
+        {/* Right: API key status & sample */}
+        <div className="flex items-center space-x-2">
+          {/* API Key Button */}
           <button
-            onClick={onLoadSample}
-            className="flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 hover:bg-slate-700/80 text-cyan-300 border border-cyan-500/30 transition-all shadow-sm hover:shadow-glow-cyan"
-            title="Uji coba langsung 1-click dengan sampel foto KTP"
+            id="btn-api-key"
+            onClick={onOpenApiKey}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all duration-200 ${
+              hasApiKey
+                ? 'bg-emerald-950/60 border-emerald-500/30 text-emerald-400 hover:bg-emerald-900/60'
+                : 'bg-amber-950/60 border-amber-500/40 text-amber-400 hover:bg-amber-900/60 animate-pulse'
+            }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Coba Demo KTP</span>
+            {hasApiKey ? (
+              <CheckCircle className="w-3.5 h-3.5" />
+            ) : (
+              <Key className="w-3.5 h-3.5" />
+            )}
+            <span>{hasApiKey ? 'Gemini Aktif' : 'Set API Key'}</span>
           </button>
 
-          <div className="hidden md:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>100% Privasi (Client-Side)</span>
-          </div>
-
-          <div className="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-[11px] font-mono text-slate-400">
-            Kapasitas: <span className={fileCount >= 10 ? "text-amber-400 font-bold" : "text-white"}>{fileCount}/10</span>
-          </div>
+          {/* Sample Demo */}
+          <button
+            id="btn-load-sample"
+            onClick={onLoadSample}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-600/40 text-xs font-semibold transition-all duration-200"
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Demo</span>
+          </button>
         </div>
-
       </div>
     </header>
   );

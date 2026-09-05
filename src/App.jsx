@@ -1,19 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import FileList from './components/FileList';
 import ResultPanel from './components/ResultPanel';
+import ApiKeyModal from './components/ApiKeyModal';
 import { preprocessImageForOCR } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
 import { parseKTPText } from './utils/ktpParser';
+import { scanKTPWithGemini } from './utils/geminiOCR';
 import { SAMPLE_PARSED_KTP } from './utils/sampleKtp';
-import { Sparkles, Zap, FileSpreadsheet, ShieldCheck } from 'lucide-react';
+import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key } from 'lucide-react';
+
+const STORAGE_KEY = 'scanktp_gemini_api_key';
+// Default key from Vercel environment variable (set in Vercel dashboard, never committed to git)
+const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
 
 export default function App() {
   const [items, setItems] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isProcessingAny, setIsProcessingAny] = useState(false);
+  // Priority: localStorage (user override) → env variable (Vercel default)
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEY) || ENV_API_KEY);
+  const [showApiModal, setShowApiModal] = useState(false);
+
+  // Persist API key to localStorage
+  const handleSaveApiKey = (key) => {
+    setApiKey(key);
+    if (key) {
+      localStorage.setItem(STORAGE_KEY, key);
+    } else {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  };
 
   // Handle file addition
   const handleFilesSelected = (newFiles) => {
@@ -24,18 +43,18 @@ export default function App() {
       size: file.size,
       type: file.type,
       previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
-      status: 'pending', // 'pending' | 'processing' | 'done' | 'error'
+      status: 'pending',
       progress: 0,
       parsedData: null,
-      error: null
+      error: null,
+      engine: null // 'gemini' | 'tesseract'
     }));
 
     setItems(prev => {
       const updated = [...prev, ...formatted];
-      return updated.slice(0, 10); // Cap at 10 items max
+      return updated.slice(0, 10);
     });
 
-    // Auto select first newly added item if none selected
     if (items.length === 0 && formatted.length > 0) {
       setSelectedIndex(0);
     }
@@ -46,14 +65,15 @@ export default function App() {
     const sampleItem = {
       id: 'demo-sample-ktp',
       file: null,
-      name: 'KTP_MIRA_SETIAWAN.png',
+      name: 'KTP_DEMO.png',
       size: 345000,
       type: 'image/png',
       previewUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80',
       status: 'done',
       progress: 100,
       parsedData: SAMPLE_PARSED_KTP,
-      error: null
+      error: null,
+      engine: 'demo'
     };
 
     setItems([sampleItem]);
@@ -85,27 +105,83 @@ export default function App() {
     });
   };
 
-  // Run OCR scanning on a single item index
-  const scanSingleItem = async (index, itemsList = items) => {
-    const item = itemsList[index];
-    if (!item || item.status === 'done') return;
-
-    // Update status to processing
+  const updateItemStatus = (index, updates) => {
     setItems(prev => {
       const copy = [...prev];
-      copy[index] = { ...copy[index], status: 'processing', progress: 10, error: null };
+      if (copy[index]) {
+        copy[index] = { ...copy[index], ...updates };
+      }
       return copy;
     });
+  };
+
+  // Run OCR scanning on a single item
+  const scanSingleItem = async (index, itemsList = null) => {
+    const currentItems = itemsList || items;
+    const item = currentItems[index];
+    if (!item || item.status === 'done') return;
+
+    updateItemStatus(index, { status: 'processing', progress: 5, error: null });
 
     try {
-      let imageSources = [];
+      // === STRATEGY 1: Use Gemini Vision API (if API key available) ===
+      if (apiKey && apiKey.trim()) {
+        try {
+          updateItemStatus(index, { progress: 20 });
 
+          let imageSource;
+          if (item.file) {
+            if (item.file.type === 'application/pdf') {
+              // For PDF: convert first page to image
+              const pages = await convertPdfToImages(item.file);
+              if (pages.length === 0) throw new Error('PDF kosong');
+              imageSource = pages[0]; // Use first page as data URL
+            } else {
+              imageSource = item.file;
+            }
+          } else if (item.previewUrl) {
+            imageSource = item.previewUrl;
+          } else {
+            throw new Error('Tidak ada sumber gambar');
+          }
+
+          updateItemStatus(index, { progress: 40 });
+
+          const parsedData = await scanKTPWithGemini(imageSource, apiKey);
+
+          updateItemStatus(index, {
+            status: 'done',
+            progress: 100,
+            parsedData,
+            engine: 'gemini'
+          });
+          return;
+
+        } catch (geminiErr) {
+          if (geminiErr.message === 'API_KEY_INVALID') {
+            // Invalid key, prompt user to update
+            updateItemStatus(index, {
+              status: 'error',
+              progress: 0,
+              error: 'API Key Gemini tidak valid. Klik "Set API Key" untuk memperbarui.',
+              engine: null
+            });
+            return;
+          }
+          // Other Gemini errors → fallback to Tesseract
+          console.warn('Gemini failed, falling back to Tesseract:', geminiErr.message);
+          updateItemStatus(index, { progress: 30 });
+        }
+      }
+
+      // === STRATEGY 2: Tesseract OCR (fallback / no API key) ===
+      updateItemStatus(index, { progress: 35 });
+
+      let imageSources = [];
       if (item.file) {
         if (item.file.type === 'application/pdf') {
-          // Convert PDF page to high DPI image
           imageSources = await convertPdfToImages(item.file);
         } else {
-          // Pre-process image for better contrast & grayscale OCR
           const preprocessed = await preprocessImageForOCR(item.file);
           imageSources = [preprocessed];
         }
@@ -113,73 +189,61 @@ export default function App() {
         imageSources = [item.previewUrl];
       }
 
-      if (imageSources.length === 0) {
-        throw new Error('Tidak ada sumber gambar yang valid');
-      }
+      if (imageSources.length === 0) throw new Error('Tidak ada sumber gambar yang valid');
 
-      // Initialize Tesseract worker (Indonesian + English)
       const worker = await createWorker('ind+eng');
-      
-      // Configure Tesseract parameters for e-KTP card layout
       await worker.setParameters({
-        tessedit_pageseg_mode: '3', // Fully automatic page segmentation mode
+        tessedit_pageseg_mode: '6', // Assume single uniform block of text
       });
 
       let combinedRawText = '';
       for (let i = 0; i < imageSources.length; i++) {
         const result = await worker.recognize(imageSources[i]);
         combinedRawText += result.data.text + '\n';
-        
-        // Update progress
-        const p = Math.round(((i + 1) / imageSources.length) * 90);
-        setItems(prev => {
-          const copy = [...prev];
-          if (copy[index]) copy[index].progress = p;
-          return copy;
-        });
+        const p = 35 + Math.round(((i + 1) / imageSources.length) * 55);
+        updateItemStatus(index, { progress: p });
       }
 
       await worker.terminate();
 
-      // Parse structured fields
       const parsedData = parseKTPText(combinedRawText);
 
-      // Update item to done
-      setItems(prev => {
-        const copy = [...prev];
-        copy[index] = {
-          ...copy[index],
-          status: 'done',
-          progress: 100,
-          parsedData: parsedData
-        };
-        return copy;
+      updateItemStatus(index, {
+        status: 'done',
+        progress: 100,
+        parsedData,
+        engine: 'tesseract'
       });
 
     } catch (err) {
       console.error('Scan error:', err);
-      setItems(prev => {
-        const copy = [...prev];
-        copy[index] = {
-          ...copy[index],
-          status: 'error',
-          progress: 0,
-          error: err.message || 'Gagal melakukan OCR'
-        };
-        return copy;
+      updateItemStatus(index, {
+        status: 'error',
+        progress: 0,
+        error: err.message || 'Gagal melakukan scan',
+        engine: null
       });
     }
   };
 
-  // Run OCR scanning on all pending items sequentially
+  // Run OCR on all pending items
   const handleScanAll = async () => {
     if (items.length === 0 || isProcessingAny) return;
     setIsProcessingAny(true);
 
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].status !== 'done') {
+    // If no API key, prompt user
+    if (!apiKey || !apiKey.trim()) {
+      setShowApiModal(true);
+      setIsProcessingAny(false);
+      return;
+    }
+
+    // Get current snapshot of items to process
+    const snapshot = [...items];
+    for (let i = 0; i < snapshot.length; i++) {
+      if (snapshot[i].status !== 'done') {
         setSelectedIndex(i);
-        await scanSingleItem(i, items);
+        await scanSingleItem(i);
       }
     }
 
@@ -190,7 +254,21 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-[#080c14] text-slate-100 font-sans">
       
       {/* Top Navbar */}
-      <Header onLoadSample={handleLoadSample} fileCount={items.length} />
+      <Header
+        onLoadSample={handleLoadSample}
+        fileCount={items.length}
+        hasApiKey={!!(apiKey && apiKey.trim())}
+        onOpenApiKey={() => setShowApiModal(true)}
+      />
+
+      {/* API Key Modal */}
+      {showApiModal && (
+        <ApiKeyModal
+          apiKey={apiKey}
+          onSave={handleSaveApiKey}
+          onClose={() => setShowApiModal(false)}
+        />
+      )}
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col">
@@ -203,15 +281,26 @@ export default function App() {
             </div>
             <div>
               <h2 className="text-sm font-bold text-white flex items-center">
-                Scan e-KTP Batch & Langsung Copy Hasil
+                Scan e-KTP dengan Gemini AI Vision
               </h2>
               <p className="text-xs text-slate-400">
-                Unggah hingga 10 foto/PDF KTP. Data NIK, Nama, Alamat, dll. otomatis terekstraksi ke tabel di panel kanan.
+                {apiKey
+                  ? 'Gemini AI aktif — akurasi maksimal. Unggah foto KTP dan scan otomatis.'
+                  : 'Klik "Set API Key" di atas untuk mengaktifkan AI Vision. Gratis di aistudio.google.com'}
               </p>
             </div>
           </div>
 
           <div className="flex items-center space-x-2 text-xs text-slate-400">
+            {!apiKey && (
+              <button
+                onClick={() => setShowApiModal(true)}
+                className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 font-semibold transition-colors"
+              >
+                <Key className="w-3.5 h-3.5" />
+                <span>Set API Key Sekarang</span>
+              </button>
+            )}
             <span className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
               <span>Format Tabel Rapi</span>
@@ -223,20 +312,17 @@ export default function App() {
           </div>
         </div>
 
-        {/* Split Grid Layout (Left Panel vs Right Panel) */}
+        {/* Split Grid Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 items-start">
           
-          {/* Left Column: Upload Zone & Queue List (5 cols) */}
+          {/* Left Column */}
           <div className="lg:col-span-5 flex flex-col space-y-4">
-            
-            {/* Dropzone */}
             <UploadZone
               onFilesSelected={handleFilesSelected}
               currentCount={items.length}
               maxFiles={10}
             />
 
-            {/* Queue File List */}
             <FileList
               items={items}
               onRemoveItem={handleRemoveItem}
@@ -247,10 +333,9 @@ export default function App() {
               selectedIndex={selectedIndex}
               onSelectIndex={setSelectedIndex}
             />
-
           </div>
 
-          {/* Right Column: Live Table Review & Copy Panel (7 cols) */}
+          {/* Right Column */}
           <div className="lg:col-span-7 h-full min-h-[500px]">
             <ResultPanel
               items={items}
@@ -259,14 +344,13 @@ export default function App() {
               onUpdateKTPData={handleUpdateKTPData}
             />
           </div>
-
         </div>
 
       </main>
 
       {/* Footer */}
       <footer className="py-4 border-t border-slate-800/80 text-center text-xs text-slate-500">
-        ScanKTP.ai — Powered by Tesseract OCR Client-Side • Siap Deploy di Vercel
+        ScanKTP.ai — Powered by Gemini Vision AI + Tesseract OCR • Client-Side • Siap Deploy di Vercel
       </footer>
 
     </div>
