@@ -1,7 +1,6 @@
 /**
  * Ultra-Resilient e-KTP Fuzzy & Positional Parser
- * Handles dot-matrix NIK numbers, fuzzy Kota/Kabupaten detection,
- * and fixes issuance date misalignments.
+ * Precision NIK colon isolation & Kota/Kabupaten lock.
  */
 
 export function parseKTPText(rawText) {
@@ -10,25 +9,12 @@ export function parseKTPText(rawText) {
   const data = getDefaultKTPData();
   data.rawText = rawText;
 
-  // Split lines & clean
   const lines = rawText
     .split('\n')
     .map(l => l.trim())
     .filter(l => l.length > 0);
 
-  // Helper: clean OCR digit typos (0 vs O/o/u/D, 1 vs I/l/i, 5 vs S/s, 8 vs B/b, 9 vs g/q, 2 vs Z/z)
-  const cleanDigits = (str) => {
-    return str
-      .replace(/[Oo0uD]/g, '0')
-      .replace(/[Il|i]/g, '1')
-      .replace(/[Zz]/g, '2')
-      .replace(/[Ss]/g, '5')
-      .replace(/[Bb]/g, '8')
-      .replace(/[gq]/g, '9')
-      .replace(/\D/g, '');
-  };
-
-  // Helper: extract value after colon or key
+  // Helper to extract value strictly AFTER colon or keyword
   const getValueAfterKey = (line, keys = []) => {
     if (!line) return '';
     for (const key of keys) {
@@ -45,13 +31,26 @@ export function parseKTPText(rawText) {
     return line.trim();
   };
 
+  // Helper to clean OCR digit typos (0 vs O/o/u/D, 1 vs I/l/i, 5 vs S/s, 8 vs B/b, 9 vs g/q, 2 vs Z/z)
+  const cleanDigitsOnly = (str) => {
+    return str
+      .replace(/[Oo0uD]/g, '0')
+      .replace(/[Il|i]/g, '1')
+      .replace(/[Zz]/g, '2')
+      .replace(/[Ss]/g, '5')
+      .replace(/[Bb]/g, '8')
+      .replace(/[gq]/g, '9')
+      .replace(/\D/g, '');
+  };
+
   // 1. NIK Extraction (Target: 16 digits)
-  // Strategy A: Check lines containing NIK or digits
+  // Find NIK line and strip 'NIK' and ':' BEFORE converting digits
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
     if (upper.includes('NIK') || upper.includes('N1K') || upper.includes('NI K') || upper.includes('N.I.K') || i === 2) {
-      const digitsOnly = cleanDigits(line);
+      const valAfterNik = getValueAfterKey(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
+      const digitsOnly = cleanDigitsOnly(valAfterNik);
       if (digitsOnly.length >= 14) {
         data.nik = digitsOnly.substring(0, 16);
         break;
@@ -59,9 +58,11 @@ export function parseKTPText(rawText) {
     }
   }
 
-  // Strategy B: Scan whole rawText for any 16-digit sequence if not found
+  // Strategy B: Scan whole rawText if NIK line was missed
   if (!data.nik) {
-    const cleanedRawDigits = cleanDigits(rawText);
+    // Remove the word NIK first
+    const noNikText = rawText.replace(/NIK/gi, '');
+    const cleanedRawDigits = cleanDigitsOnly(noNikText);
     const m = cleanedRawDigits.match(/\d{16}/);
     if (m) {
       data.nik = m[0];
@@ -78,21 +79,20 @@ export function parseKTPText(rawText) {
       data.provinsi = upper.replace(/.*PROV[IINSI]*\s*/i, '').replace(/^[:;\s]+/, '').trim();
     }
 
-    // KOTA / KABUPATEN
-    if (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('PEKALONGAN') || upper.includes('JAKARTA')) {
-      if (!upper.includes('PROVINSI')) {
-        let cityVal = upper
-          .replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '')
-          .replace(/^[:;\s]+/, '')
-          .trim();
-        if (!cityVal && (upper.includes('KABUPATEN') || upper.includes('KAB'))) {
-          cityVal = line.replace(/^[:;\s]+/, '').trim();
+    // KOTA / KABUPATEN (ONLY set once or from top 3 header lines)
+    if (!data.kota || i < 3) {
+      if (upper.includes('KABUPATEN') || upper.includes('KAB') || upper.includes('KOTA')) {
+        if (!upper.includes('PROVINSI') && !upper.includes('PEKERJAAN')) {
+          let cityVal = upper
+            .replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '')
+            .replace(/^[:;\s]+/, '')
+            .trim();
+          data.kota = cityVal || line.replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '').trim();
         }
-        data.kota = cityVal || line;
+      } else if (i === 1 && !upper.includes('PROVINSI') && !upper.includes('NIK')) {
+        // Line 2 is standard e-KTP Kota/Kabupaten line
+        data.kota = line.replace(/^[:;\s]+/, '').trim();
       }
-    } else if (i === 1 && !data.kota && !upper.includes('PROVINSI') && !upper.includes('NIK')) {
-      // Line 2 is traditionally KABUPATEN/KOTA line
-      data.kota = line.replace(/^[:;\s]+/, '').trim();
     }
 
     // NAMA LENGKAP
@@ -101,9 +101,9 @@ export function parseKTPText(rawText) {
       if (val) data.nama = cleanName(val);
     }
 
-    // TEMPAT / TGL LAHIR (Ignore bottom issuance dates like 21-04-2021 if near 'SEUMUR HIDUP' or 'BERLAKU')
-    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('SEMARANG') || upper.includes('PEKALONGAN') || upper.includes('JAKARTA')) {
-      if (!upper.includes('BERLAKU') && !upper.includes('HINGGA') && !upper.includes('SEUMUR')) {
+    // TEMPAT / TGL LAHIR
+    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('SEMARANG') || upper.includes('PEKALONGAN')) {
+      if (!upper.includes('BERLAKU') && !upper.includes('HINGGA') && !upper.includes('SEUMUR') && !upper.includes('PEKERJAAN')) {
         const val = getValueAfterKey(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR', 'TEMPAT']);
         if (val) data.tempatTglLahir = val;
       }
@@ -170,8 +170,10 @@ export function parseKTPText(rawText) {
     // PEKERJAAN
     if (upper.includes('PEKERJAAN') || upper.includes('BEKERJA') || upper.includes('PEDAGANG') || upper.includes('SWASTA') || upper.includes('PNS') || upper.includes('PELAJAR')) {
       const val = getValueAfterKey(line, ['PEKERJAAN']);
-      if (val) data.pekerjaan = val;
-      else if (!upper.includes('PEKERJAAN')) data.pekerjaan = line;
+      if (val) {
+        // Strip bottom issuance city/date if appended
+        data.pekerjaan = val.replace(/\s*GRESIK.*$/i, '').trim();
+      }
     }
 
     // KEWARGANEGARAAN
@@ -190,7 +192,7 @@ export function parseKTPText(rawText) {
     }
   }
 
-  // 3. Positional Fallbacks for missing Nama or Tempat/Tgl Lahir
+  // 3. Positional Fallback for missing Nama or Tempat/Tgl Lahir
   if (!data.nama) {
     for (let i = 0; i < Math.min(lines.length, 6); i++) {
       const l = lines[i];
