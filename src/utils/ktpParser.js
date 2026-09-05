@@ -1,5 +1,6 @@
 /**
- * Ultra AI e-KTP Parser with Multi-KTP Batch Isolation & Precise Fuzzy Engine
+ * Indonesian e-KTP Text Parser — Improved Fallback for Tesseract OCR
+ * Used when Gemini API is unavailable. More robust regex + validation.
  */
 import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData';
 
@@ -14,240 +15,274 @@ export function parseKTPText(rawText) {
     .map(l => l.trim())
     .filter(l => l.length > 0);
 
-  const getValueAfterKey = (line, keys = []) => {
+  // ── Utility helpers ─────────────────────────────────────────────────────────
+  const getValueAfterLabel = (line, labels = []) => {
     if (!line) return '';
-    for (const key of keys) {
-      const idx = line.toUpperCase().indexOf(key.toUpperCase());
+    for (const lbl of labels) {
+      const idx = line.toUpperCase().indexOf(lbl.toUpperCase());
       if (idx !== -1) {
-        let rem = line.substring(idx + key.length).trim();
-        return rem.replace(/^[:;\s\-\.=]+/, '').trim();
+        return line.substring(idx + lbl.length).replace(/^[\s:;.\-=|]+/, '').trim();
       }
     }
     const colonIdx = line.indexOf(':');
-    if (colonIdx !== -1) {
-      return line.substring(colonIdx + 1).replace(/^[:;\s\-\.=]+/, '').trim();
-    }
+    if (colonIdx !== -1) return line.substring(colonIdx + 1).replace(/^[\s:;.\-=|]+/, '').trim();
     return line.trim();
   };
 
-  const cleanDigitsOnly = (str) => {
-    return str
-      .replace(/[Oo0uD]/g, '0')
-      .replace(/[Il|i]/g, '1')
-      .replace(/[Zz]/g, '2')
-      .replace(/[Ss]/g, '5')
-      .replace(/[Bb]/g, '8')
-      .replace(/[gq]/g, '9')
-      .replace(/\D/g, '');
-  };
-
-  // 1. Line by Line Parser
+  // ── Line-by-line extraction ──────────────────────────────────────────────────
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
 
-    // PROVINSI
-    if (upper.includes('PROV') || i === 0) {
-      if (upper.includes('PROV') || upper.includes('JAWA') || upper.includes('JAKARTA') || upper.includes('DKI')) {
+    // PROVINSI (line 0 or contains PROVINSI keyword)
+    if ((i === 0 || upper.includes('PROVINSI') || upper.includes('PROV')) && !data.provinsi) {
+      if (upper.includes('JAWA') || upper.includes('JAKARTA') || upper.includes('DKI') ||
+          upper.includes('BALI') || upper.includes('BANTEN') || upper.includes('RIAU') ||
+          upper.includes('SUMATERA') || upper.includes('KALIMANTAN') || upper.includes('SULAWESI') ||
+          upper.includes('PROV') || i === 0) {
         data.provinsi = matchFuzzyProvince(upper);
       }
     }
 
-    // KOTA / KABUPATEN (Target Line 2 / Fuse.js)
-    if (!data.kota && i <= 3) {
-      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('JAKARTA') || upper.includes('PEKALONGAN') || i === 1)) {
-        data.kota = matchFuzzyCity(line, rawText);
-      }
-    }
-
-    // NAMA LENGKAP
-    if (upper.includes('NAMA') && !upper.includes('AGAMA') && !upper.includes('NEGARA')) {
-      const val = getValueAfterKey(line, ['NAMA']);
-      if (val) data.nama = cleanName(val);
-    }
-
-    // TEMPAT / TGL LAHIR
-    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('JAKARTA') || upper.includes('SEMARANG') || upper.includes('PEKALONGAN')) {
-      if (!upper.includes('BERLAKU') && !upper.includes('HINGGA') && !upper.includes('SEUMUR') && !upper.includes('PEKERJAAN')) {
-        const val = getValueAfterKey(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR', 'TEMPAT']);
-        if (val) data.tempatTglLahir = val;
-      }
-    }
-
-    // JENIS KELAMIN & GOL DARAH
-    if (upper.includes('KELAMIN') || upper.includes('LAKI') || upper.includes('PEREMPUAN')) {
-      if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
-      else if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
-
-      if (upper.includes('GOL') || upper.includes('DARAH') || upper.includes('B') || upper.includes('A') || upper.includes('O')) {
-        const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O\-]+)/i) || upper.match(/\b(A|B|AB|O|-)\b/);
-        if (golMatch && (upper.includes('GOL') || upper.includes('DARAH'))) {
-          data.golDarah = golMatch[1] || '-';
+    // KOTA / KABUPATEN (line 1 only, if not already captured)
+    if (!data.kota && i <= 2) {
+      if (!upper.includes('PROVINSI') && !upper.includes('REPUBLIK')) {
+        if (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('JAKARTA') ||
+            upper.includes('GRESIK') || upper.includes('SEMARANG') || upper.includes('SURABAYA') ||
+            i === 1) {
+          data.kota = matchFuzzyCity(line, rawText);
         }
       }
     }
 
-    // ALAMAT
-    if (upper.includes('ALAMAT') || upper.includes('JL.') || upper.includes('JALAN') || upper.includes('DUSUN') || upper.includes('PASTI')) {
-      if (!upper.includes('RT') && !upper.includes('KEL') && !upper.includes('KEC')) {
-        const val = getValueAfterKey(line, ['ALAMAT']);
-        if (val) data.alamat = val;
+    // NIK — look for explicit NIK label first
+    if ((upper.includes('NIK') || upper.match(/^N[I1]K/)) && !data.nik) {
+      const val = getValueAfterLabel(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
+      const digits = extractDigits(val);
+      if (digits.length >= 15) {
+        data.nik = digits.substring(0, 16);
       }
     }
 
-    // RT / RW (Match digits / digits, e.g. 014/007 or 007/008)
-    if (upper.includes('RT') || upper.includes('RW') || upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/)) {
-      const rtMatch = upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/);
+    // NAMA
+    if (upper.match(/^NAMA\b/) || upper.match(/NAMA\s*:/)) {
+      if (!upper.includes('AGAMA') && !upper.includes('NEGARA') && !upper.includes('KEWARGANEGARAAN')) {
+        const val = getValueAfterLabel(line, ['NAMA']);
+        if (val && val.length > 2) data.nama = cleanName(val);
+      }
+    }
+
+    // TEMPAT / TGL LAHIR
+    if ((upper.includes('TEMPAT') || upper.match(/TGL\s*LAHIR/) || upper.match(/TANGGAL\s*LAHIR/)) &&
+        !upper.includes('BERLAKU') && !upper.includes('HINGGA')) {
+      const val = getValueAfterLabel(line, [
+        'TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'TEMPAT', 'TGL LAHIR', 'TANGGAL LAHIR'
+      ]);
+      if (val && val.length > 2) data.tempatTglLahir = normalizeDate(val);
+    }
+
+    // JENIS KELAMIN + GOL DARAH (same line)
+    if (upper.includes('KELAMIN') || upper.match(/^(LAKI|PEREMPUAN)/)) {
+      if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
+      else if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
+
+      const golMatch = line.match(/\b(AB|A|B|O)\b/i);
+      if (golMatch && (upper.includes('GOL') || upper.includes('DARAH') || i <= lines.length - 1)) {
+        data.golDarah = golMatch[1].toUpperCase();
+      }
+    }
+
+    // GOL DARAH (standalone or on same line as kelamin)
+    if ((upper.includes('GOL') || upper.includes('DARAH')) && !data.golDarah) {
+      const golMatch = line.match(/\b(AB|A|B|O)\b/i);
+      if (golMatch) data.golDarah = golMatch[1].toUpperCase();
+    }
+
+    // ALAMAT — strictly the address line, no RT/RW/Kel
+    if ((upper.match(/^ALAMAT\b/) || upper.match(/ALAMAT\s*:/)) &&
+        !upper.includes('RT') && !upper.includes('KEL') && !upper.includes('KEC')) {
+      const val = getValueAfterLabel(line, ['ALAMAT']);
+      if (val && val.length > 2) data.alamat = val.toUpperCase();
+    }
+
+    // RT / RW — pattern: digits/digits
+    if (!data.rtRw && (upper.match(/\bRT\b/) || upper.match(/\bRW\b/) || upper.match(/\d{2,3}\s*\/\s*\d{2,3}/))) {
+      const rtMatch = line.match(/(\d{1,3})\s*[\/\\]\s*(\d{1,3})/);
       if (rtMatch) {
-        data.rtRw = rtMatch[0].replace(/\s+/g, '');
-      } else {
-        const val = getValueAfterKey(line, ['RT/RW', 'RT / RW', 'RT']);
-        if (val && val.includes('/')) data.rtRw = val;
+        const rt = rtMatch[1].padStart(3, '0');
+        const rw = rtMatch[2].padStart(3, '0');
+        data.rtRw = `${rt}/${rw}`;
       }
     }
 
-    // KEL / DESA (Must NOT contain 'KELAMIN')
-    if (!upper.includes('KELAMIN')) {
-      if (upper.includes('KEL/') || upper.includes('DESA') || upper.includes('SETRO') || upper.includes('PEGADUNGAN') || upper.includes('KELURAHAN')) {
-        const val = getValueAfterKey(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
-        if (val) data.kelDesa = val;
-      }
+    // KEL / DESA — must NOT contain KELAMIN
+    if (!upper.includes('KELAMIN') &&
+        (upper.match(/\bKEL\b/) || upper.includes('DESA') || upper.includes('KELURAHAN'))) {
+      const val = getValueAfterLabel(line, ['KEL/DESA', 'KELURAHAN', 'DESA', 'KEL']);
+      if (val && val.length > 1) data.kelDesa = val.toUpperCase();
     }
 
     // KECAMATAN
-    if (upper.includes('KECAMATAN') || upper.includes('KEC') || upper.includes('MENGANTI') || upper.includes('KALIDERES')) {
-      const val = getValueAfterKey(line, ['KECAMATAN', 'KEC']);
-      if (val) data.kecamatan = val;
+    if (upper.includes('KECAMATAN') || upper.match(/\bKEC\b/)) {
+      const val = getValueAfterLabel(line, ['KECAMATAN', 'KEC']);
+      if (val && val.length > 1) data.kecamatan = val.toUpperCase();
     }
 
     // AGAMA
-    if (upper.includes('AGAMA') || upper.includes('ISLAM') || upper.includes('KRISTEN') || upper.includes('HINDU') || upper.includes('BUDDHA')) {
-      const val = getValueAfterKey(line, ['AGAMA']) || line;
-      if (val) data.agama = normalizeAgama(val);
+    if (upper.match(/^AGAMA\b/) || upper.match(/AGAMA\s*:/)) {
+      const val = getValueAfterLabel(line, ['AGAMA']);
+      if (val) data.agama = normalizeAgama(val || line);
+    }
+    // Detect religion by keyword if AGAMA label not found
+    if (!data.agama) {
+      if (upper.match(/\bISLAM\b/)) data.agama = 'ISLAM';
+      else if (upper.match(/\bKRISTEN\b/)) data.agama = 'KRISTEN';
+      else if (upper.match(/\bKATHOLIK\b|\bKATOLIK\b/)) data.agama = 'KATHOLIK';
+      else if (upper.match(/\bHINDU\b/)) data.agama = 'HINDU';
+      else if (upper.match(/\bBUDDHA\b|\bBUDHA\b/)) data.agama = 'BUDDHA';
     }
 
     // STATUS PERKAWINAN
-    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN') || upper.includes('STATUS')) {
+    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN')) {
       if (upper.includes('BELUM')) data.statusPerkawinan = 'BELUM KAWIN';
       else if (upper.includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
       else if (upper.includes('CERAI HIDUP')) data.statusPerkawinan = 'CERAI HIDUP';
       else if (upper.includes('KAWIN')) data.statusPerkawinan = 'KAWIN';
     }
 
-    // PEKERJAAN
-    if (upper.includes('PEKERJAAN') || upper.includes('BEKERJA') || upper.includes('PEDAGANG') || upper.includes('SWASTA') || upper.includes('PNS') || upper.includes('PELAJAR')) {
-      const val = getValueAfterKey(line, ['PEKERJAAN']);
+    // PEKERJAAN — strictly after PEKERJAAN label
+    if (upper.match(/^PEKERJAAN\b/) || upper.match(/PEKERJAAN\s*:/)) {
+      const val = getValueAfterLabel(line, ['PEKERJAAN']);
       if (val) {
-        data.pekerjaan = val.replace(/\s*(?:GRESIK|JAKARTA).*/i, '').replace(/\s*\d{2}[\-\/]\d{2}[\-\/]\d{4}.*$/i, '').trim();
+        // Remove any trailing location or date that might bleed in
+        data.pekerjaan = val
+          .replace(/\s*(?:WNI|WNA)\s*$/i, '')
+          .replace(/\s*\d{2}[-\/]\d{2}[-\/]\d{4}.*$/, '')
+          .toUpperCase()
+          .trim();
       }
     }
 
     // KEWARGANEGARAAN
-    if (upper.includes('KEWARGANEGARAAN') || upper.includes('WNI') || upper.includes('WNA')) {
-      if (upper.includes('WNI')) data.kewarganegaraan = 'WNI';
-      else if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
+    if (upper.includes('KEWARGANEGARAAN') || upper.match(/\bWNI\b/) || upper.match(/\bWNA\b/)) {
+      if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
+      else data.kewarganegaraan = 'WNI';
     }
 
-    // BERLAKU HINGGA
-    if (upper.includes('BERLAKU') || upper.includes('SEUMUR') || upper.includes('HINGGA')) {
-      if (upper.includes('SEUMUR')) data.berlakuHingga = 'SEUMUR HIDUP';
-      else {
-        const val = getValueAfterKey(line, ['BERLAKU HINGGA', 'BERLAKU']);
-        if (val) data.berlakuHingga = val;
+    // BERLAKU HINGGA — extract FIRST date only
+    if (upper.includes('BERLAKU') || upper.includes('HINGGA')) {
+      if (upper.includes('SEUMUR')) {
+        data.berlakuHingga = 'SEUMUR HIDUP';
+      } else {
+        const val = getValueAfterLabel(line, ['BERLAKU HINGGA', 'BERLAKU']);
+        // Extract only first date
+        const dateMatches = val.match(/\d{1,2}[-\/.\s]\d{1,2}[-\/.\s]\d{2,4}/g);
+        if (dateMatches && dateMatches.length > 0) {
+          data.berlakuHingga = dateMatches[0].replace(/[\/.\s]/g, '-');
+        } else if (val && val.toUpperCase().includes('SEUMUR')) {
+          data.berlakuHingga = 'SEUMUR HIDUP';
+        }
       }
     }
   }
 
-  // 2. Kota & Provinsi Fallbacks
-  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4) {
-    data.kota = matchFuzzyCity(data.kota || '', rawText);
-  }
-
+  // ── Fallbacks ─────────────────────────────────────────────────────────────
   if (!data.provinsi) {
-    data.provinsi = matchFuzzyProvince(lines[0] || rawText);
+    data.provinsi = matchFuzzyProvince((lines[0] || '') + ' ' + rawText);
+  }
+  if (!data.kota || data.kota.length < 3) {
+    data.kota = matchFuzzyCity('', rawText);
   }
 
-  // 3. NIK Extraction & Smart DOB Cross-Validation
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const upper = line.toUpperCase();
-    if (upper.includes('NIK') || upper.includes('N1K') || upper.includes('NI K') || upper.includes('N.I.K') || i === 2) {
-      const valAfterNik = getValueAfterKey(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
-      let digitsOnly = cleanDigitsOnly(valAfterNik);
-
-      if (digitsOnly.length > 16 && digitsOnly.startsWith('13')) {
-        digitsOnly = digitsOnly.substring(1);
-      }
-
-      if (digitsOnly.length >= 15) {
-        data.nik = digitsOnly.substring(0, 16);
-        break;
-      }
-    }
-  }
-
+  // ── NIK fallback: scan entire text for 16-digit sequence ──────────────────
   if (!data.nik) {
-    const noNikText = rawText.replace(/NIK/gi, '');
-    let cleanedRawDigits = cleanDigitsOnly(noNikText);
-    const m = cleanedRawDigits.match(/\d{16}/);
+    // Remove NIK label to avoid it being counted as digits
+    const noLabel = rawText.replace(/NIK/gi, '').replace(/N1K/gi, '');
+    const cleaned = extractDigits(noLabel);
+    const m = cleaned.match(/\d{16}/);
     if (m) data.nik = m[0];
   }
-
-  // AI Cross-Validation with DOB (ONLY if NIK has stencil 4/0 misread)
-  if (data.nik && data.tempatTglLahir && data.nik.includes('3374')) {
-    data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
-  }
-
   if (data.nik && data.nik.length > 16) {
     data.nik = data.nik.substring(0, 16);
+  }
+
+  // ── NIK ↔ DOB cross-validation ────────────────────────────────────────────
+  if (data.nik && data.nik.length === 16 && data.tempatTglLahir) {
+    data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
   }
 
   return data;
 }
 
-function repairNikWithDOB(rawNik, tempatTglLahir, jenisKelamin) {
-  const dateMatch = tempatTglLahir.match(/(\d{2})[\-\/](\d{2})[\-\/](\d{4}|\d{2})/);
-  if (!dateMatch) return rawNik.substring(0, 16);
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Extract only digit characters from string (no OCR char substitution — that's too risky)
+ */
+function extractDigits(str) {
+  if (!str) return '';
+  return str.replace(/\D/g, '');
+}
+
+/**
+ * Normalize date string to "KOTA, DD-MM-YYYY" format
+ */
+function normalizeDate(val) {
+  // Remove known non-date contamination
+  const clean = val.replace(/^WNI\s*/i, '').replace(/^WNA\s*/i, '').trim();
+  // Try to fix separator
+  return clean.replace(/[\/\.]/g, '-');
+}
+
+/**
+ * Repair NIK date portion using known birth date from KTP text
+ */
+function repairNikWithDOB(nik, tempatTglLahir, jenisKelamin) {
+  const dateMatch = tempatTglLahir.match(/(\d{2})-(\d{2})-(\d{2,4})/);
+  if (!dateMatch) return nik;
 
   let day = parseInt(dateMatch[1], 10);
-  const monthStr = dateMatch[2];
-  const yearStr = dateMatch[3].slice(-2);
+  const month = dateMatch[2];
+  const year = dateMatch[3].slice(-2);
 
-  if (jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN')) {
-    day += 40;
+  const isPerempuan = jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN');
+  if (isPerempuan) day += 40;
+
+  const expectedDay = day < 10 ? `0${day}` : `${day}`;
+  const expectedDob = expectedDay + month + year;
+
+  const prefix   = nik.substring(0, 6);
+  const nikDob   = nik.substring(6, 12);
+  const sequence = nik.substring(12, 16);
+
+  if (/^\d{6}$/.test(expectedDob) && nikDob !== expectedDob) {
+    console.log(`[NIK Repair] Was: ${nikDob} → Should be: ${expectedDob}`);
+    return prefix + expectedDob + sequence;
   }
-
-  const expectedDayStr = day < 10 ? `0${day}` : `${day}`;
-  const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`;
-
-  const prefix = rawNik.substring(0, 6);
-  const sequence = rawNik.substring(12, 16) || '0004';
-
-  const repairedNik = `${prefix}${expectedDobDigits}${sequence}`;
-  return repairedNik.substring(0, 16);
+  return nik;
 }
 
 function cleanName(raw) {
-  if (!raw) return '';
   return raw
-    .replace(/^[:;\s]+/, '')
-    .replace(/[^A-Za-z\s\.,']/g, '')
+    .replace(/^[\s:;|]+/, '')
+    .replace(/[^A-Za-z\s.',\-]/g, '')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .toUpperCase();
 }
 
 function normalizeAgama(raw) {
-  if (!raw) return '';
   const upper = raw.toUpperCase();
   if (upper.includes('ISLAM')) return 'ISLAM';
   if (upper.includes('KRISTEN')) return 'KRISTEN';
-  if (upper.includes('KATHOLIK') || upper.includes('KATOLIK')) return 'KATHOLIK';
+  if (upper.includes('KATHOL') || upper.includes('KATOL')) return 'KATHOLIK';
   if (upper.includes('HINDU')) return 'HINDU';
   if (upper.includes('BUDDHA') || upper.includes('BUDHA')) return 'BUDDHA';
-  if (upper.includes('KHONGHUCU') || upper.includes('KONGHUCU')) return 'KHONGHUCU';
-  return raw.replace(/.*AGAMA\s*:?/i, '').replace(/^[:;\s]+/, '').trim();
+  if (upper.includes('KHONG') || upper.includes('KONG')) return 'KHONGHUCU';
+  return raw.replace(/.*AGAMA\s*:?/i, '').replace(/^[\s:;]+/, '').trim().toUpperCase();
 }
 
+// ── Default data structure ─────────────────────────────────────────────────────
 export function getDefaultKTPData() {
   return {
     provinsi: '',
@@ -266,37 +301,37 @@ export function getDefaultKTPData() {
     pekerjaan: '',
     kewarganegaraan: 'WNI',
     berlakuHingga: 'SEUMUR HIDUP',
-    rawText: ''
+    rawText: '',
   };
 }
 
+// ── Clipboard Formatters ───────────────────────────────────────────────────────
 export function formatKTPForClipboard(ktp, index = null) {
   const header = index !== null ? `=== DATA KTP #${index + 1} ===` : `=== DATA KTP ===`;
-  
   return [
     header,
-    ktp.provinsi ? `PROVINSI           : ${ktp.provinsi}` : null,
-    ktp.kota ? `KOTA/KABUPATEN     : ${ktp.kota}` : null,
-    `NIK                : ${ktp.nik || '-'}`,
-    `Nama               : ${ktp.nama || '-'}`,
-    `Tempat/Tgl Lahir   : ${ktp.tempatTglLahir || '-'}`,
-    `Jenis Kelamin      : ${ktp.jenisKelamin || '-'}  (Gol. Darah: ${ktp.golDarah || '-'})`,
-    `Alamat             : ${ktp.alamat || '-'}`,
-    `RT/RW              : ${ktp.rtRw || '-'}`,
-    `Kel/Desa           : ${ktp.kelDesa || '-'}`,
-    `Kecamatan          : ${ktp.kecamatan || '-'}`,
-    `Agama              : ${ktp.agama || '-'}`,
-    `Status Perkawinan  : ${ktp.statusPerkawinan || '-'}`,
-    `Pekerjaan          : ${ktp.pekerjaan || '-'}`,
-    `Kewarganegaraan    : ${ktp.kewarganegaraan || 'WNI'}`,
-    `Berlaku Hingga     : ${ktp.berlakuHingga || 'SEUMUR HIDUP'}`,
-    `==============================`
-  ].filter(Boolean).join('\n');
+    ktp.provinsi    ? `PROVINSI          : ${ktp.provinsi}` : null,
+    ktp.kota        ? `KOTA/KABUPATEN    : ${ktp.kota}` : null,
+    `NIK               : ${ktp.nik || '-'}`,
+    `Nama              : ${ktp.nama || '-'}`,
+    `Tempat/Tgl Lahir  : ${ktp.tempatTglLahir || '-'}`,
+    `Jenis Kelamin     : ${ktp.jenisKelamin || '-'}  (Gol. Darah: ${ktp.golDarah || '-'})`,
+    `Alamat            : ${ktp.alamat || '-'}`,
+    `RT/RW             : ${ktp.rtRw || '-'}`,
+    `Kel/Desa          : ${ktp.kelDesa || '-'}`,
+    `Kecamatan         : ${ktp.kecamatan || '-'}`,
+    `Agama             : ${ktp.agama || '-'}`,
+    `Status Perkawinan : ${ktp.statusPerkawinan || '-'}`,
+    `Pekerjaan         : ${ktp.pekerjaan || '-'}`,
+    `Kewarganegaraan   : ${ktp.kewarganegaraan || 'WNI'}`,
+    `Berlaku Hingga    : ${ktp.berlakuHingga || '-'}`,
+    `==============================`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export function formatAllKTPsForClipboard(ktpList) {
   if (!ktpList || ktpList.length === 0) return '';
-  return ktpList
-    .map((ktp, i) => formatKTPForClipboard(ktp, i))
-    .join('\n\n');
+  return ktpList.map((ktp, i) => formatKTPForClipboard(ktp, i)).join('\n\n');
 }

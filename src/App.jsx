@@ -193,7 +193,9 @@ export default function App() {
 
       const worker = await createWorker('ind+eng');
       await worker.setParameters({
-        tessedit_pageseg_mode: '6', // Assume single uniform block of text
+        tessedit_pageseg_mode: '4',   // Single column of variable-size text — best for KTP layout
+        tessedit_ocr_engine_mode: '1', // LSTM neural net only — more accurate than legacy
+        preserve_interword_spaces: '1', // Keep spaces between words
       });
 
       let combinedRawText = '';
