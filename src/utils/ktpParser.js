@@ -1,5 +1,5 @@
 /**
- * Ultra AI e-KTP Parser powered by Fuse.js Fuzzy Engine & DOB Cross-Validation
+ * Ultra AI e-KTP Parser with Strict Field Guardrails & Fuse.js Fuzzy Engine
  */
 import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData';
 
@@ -46,16 +46,16 @@ export function parseKTPText(rawText) {
     const line = lines[i];
     const upper = line.toUpperCase();
 
-    // PROVINSI (Using Fuse.js fuzzy match)
+    // PROVINSI
     if (upper.includes('PROV') || i === 0) {
-      if (upper.includes('PROV')) {
+      if (upper.includes('PROV') || upper.includes('JAWA') || upper.includes('JAKARTA')) {
         data.provinsi = matchFuzzyProvince(upper);
       }
     }
 
     // KOTA / KABUPATEN (Target Line 2 / Fuse.js)
     if (!data.kota && i <= 3) {
-      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('PEKALONGAN') || i === 1)) {
+      if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('GRES') || upper.includes('PEKALONGAN') || i === 1)) {
         data.kota = matchFuzzyCity(line, rawText);
       }
     }
@@ -95,21 +95,23 @@ export function parseKTPText(rawText) {
       }
     }
 
-    // RT / RW
-    if (upper.includes('RT') || upper.includes('RW') || upper.match(/\d{2,3}\s*\/\s*\d{2,3}/)) {
+    // RT / RW (Match digits / digits, e.g. 014/007)
+    if (upper.includes('RT') || upper.includes('RW') || upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/)) {
       const rtMatch = upper.match(/\d{2,3}\s*[\/\\]\s*\d{2,3}/);
       if (rtMatch) {
         data.rtRw = rtMatch[0].replace(/\s+/g, '');
       } else {
         const val = getValueAfterKey(line, ['RT/RW', 'RT / RW', 'RT']);
-        if (val) data.rtRw = val;
+        if (val && val.includes('/')) data.rtRw = val;
       }
     }
 
-    // KEL / DESA
-    if (upper.includes('KEL') || upper.includes('DESA') || upper.includes('SETRO')) {
-      const val = getValueAfterKey(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
-      if (val) data.kelDesa = val;
+    // KEL / DESA (Must NOT contain 'KELAMIN')
+    if (!upper.includes('KELAMIN')) {
+      if (upper.includes('KEL/') || upper.includes('DESA') || upper.includes('SETRO') || upper.includes('KELURAHAN')) {
+        const val = getValueAfterKey(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
+        if (val) data.kelDesa = val;
+      }
     }
 
     // KECAMATAN
@@ -156,12 +158,12 @@ export function parseKTPText(rawText) {
     }
   }
 
-  // 2. Kota / Kabupaten Fallback with Fuse.js
-  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4) {
+  // 2. Kota & Provinsi Fallbacks
+  if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4 || data.kota.includes('RATE')) {
     data.kota = matchFuzzyCity(data.kota || '', rawText);
   }
 
-  if (!data.provinsi) {
+  if (!data.provinsi || data.provinsi.includes('TIMU!')) {
     data.provinsi = matchFuzzyProvince(lines[0] || rawText);
   }
 
@@ -173,7 +175,6 @@ export function parseKTPText(rawText) {
       const valAfterNik = getValueAfterKey(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
       let digitsOnly = cleanDigitsOnly(valAfterNik);
 
-      // Strip leading colon artifact '1' if present
       if (digitsOnly.length > 16 && digitsOnly.startsWith('13')) {
         digitsOnly = digitsOnly.substring(1);
       }
@@ -196,7 +197,7 @@ export function parseKTPText(rawText) {
     if (m) data.nik = m[0];
   }
 
-  // AI Cross-Validation with DOB & Gender (Strict 16 Digits)
+  // AI Cross-Validation with DOB & Gender
   if (data.nik && data.tempatTglLahir) {
     data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
   }
@@ -221,7 +222,7 @@ function repairNikWithDOB(rawNik, tempatTglLahir, jenisKelamin) {
   }
 
   const expectedDayStr = day < 10 ? `0${day}` : `${day}`;
-  const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`; // '200404'
+  const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`;
 
   const prefix = rawNik.substring(0, 6);
   const sequence = rawNik.substring(12, 16) || '0004';
