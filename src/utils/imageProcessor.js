@@ -118,3 +118,34 @@ export async function preprocessImageForGemini(fileOrUrl) {
     return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
   }
 }
+
+// ─── 3. Dedicated NIK Region Cropper ──────────────────────────────────────────
+/**
+ * Crops the exact NIK bounding box with 2x scaling for ultra-sharp digit-only recognition
+ */
+export async function cropNIKRegion(fileOrUrl) {
+  try {
+    const img = await loadImage(fileOrUrl);
+    const canvas = document.createElement('canvas');
+
+    // NIK bounding box on standard Indonesian e-KTP:
+    // Horizontal: 18% to 76% of card width
+    // Vertical: 13% to 26% of card height
+    const sx = Math.round(img.width * 0.18);
+    const sy = Math.round(img.height * 0.13);
+    const sw = Math.round(img.width * 0.58);
+    const sh = Math.round(img.height * 0.13);
+
+    canvas.width = sw * 2;
+    canvas.height = sh * 2;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+    return canvas.toDataURL('image/png');
+  } catch (err) {
+    console.warn('cropNIKRegion failed:', err);
+    return null;
+  }
+}

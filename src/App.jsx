@@ -5,9 +5,9 @@ import UploadZone from './components/UploadZone';
 import FileList from './components/FileList';
 import ResultPanel from './components/ResultPanel';
 import ApiKeyModal from './components/ApiKeyModal';
-import { preprocessImageForOCR, preprocessImageForGemini } from './utils/imageProcessor';
+import { preprocessImageForOCR, preprocessImageForGemini, cropNIKRegion } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
-import { parseKTPText } from './utils/ktpParser';
+import { parseKTPText, repairNikWithDOB } from './utils/ktpParser';
 import { scanKTPWithGemini, parseKTPTextWithGemini } from './utils/geminiOCR';
 import { SAMPLE_PARSED_KTP } from './utils/sampleKtp';
 import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key } from 'lucide-react';
@@ -181,6 +181,28 @@ export default function App() {
 
       console.log('[Hybrid OCR] Tesseract raw text:\n', rawOCRText.substring(0, 800));
 
+      // ── STEP 1b: Dedicated High-Precision NIK Crop OCR ────────────────────
+      let dedicatedNik = '';
+      try {
+        const nikCropUrl = await cropNIKRegion(imageFile || imageSources[0]);
+        if (nikCropUrl) {
+          const nikWorker = await createWorker('eng');
+          await nikWorker.setParameters({
+            tessedit_char_whitelist: '0123456789',
+            tessedit_pageseg_mode: '7',
+          });
+          const nikRes = await nikWorker.recognize(nikCropUrl);
+          await nikWorker.terminate();
+          const cleanDigits = (nikRes?.data?.text || '').replace(/\D/g, '');
+          if (cleanDigits.length >= 15) {
+            dedicatedNik = cleanDigits.substring(0, 16);
+            console.log('[Dedicated NIK Crop Result]:', dedicatedNik);
+          }
+        }
+      } catch (nikErr) {
+        console.warn('[Dedicated NIK Crop skipped]:', nikErr.message);
+      }
+
       // ── STEP 2a: Gemini parses raw text → JSON (no image vision) ─────────
       if (apiKey && apiKey.trim()) {
         try {
@@ -212,6 +234,14 @@ export default function App() {
               }
             }
 
+            // Apply dedicated NIK crop result and repair
+            if (dedicatedNik && dedicatedNik.length === 16) {
+              finalData.nik = dedicatedNik;
+            }
+            if (finalData.nik) {
+              finalData.nik = repairNikWithDOB(finalData.nik, finalData.tempatTglLahir, finalData.jenisKelamin);
+            }
+
             updateItemStatus(index, { status: 'done', progress: 100, parsedData: finalData, engine: 'gemini' });
             return;
           }
@@ -234,6 +264,12 @@ export default function App() {
       // ── STEP 2b: Fallback — basic KTP text parser ────────────────────────
       updateItemStatus(index, { progress: 85 });
       const parsedData = parseKTPText(rawOCRText);
+      if (dedicatedNik && dedicatedNik.length === 16) {
+        parsedData.nik = dedicatedNik;
+      }
+      if (parsedData.nik) {
+        parsedData.nik = repairNikWithDOB(parsedData.nik, parsedData.tempatTglLahir, parsedData.jenisKelamin);
+      }
       updateItemStatus(index, { status: 'done', progress: 100, parsedData, engine: 'tesseract' });
 
     } catch (err) {

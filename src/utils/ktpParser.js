@@ -250,31 +250,44 @@ function normalizeDate(val) {
 }
 
 /**
- * Repair NIK date portion using known birth date from KTP text
+ * Repair NIK date portion using known birth date from KTP text,
+ * and fix common OCR sequence number transposition (e.g. 0040 -> 0004)
  */
-function repairNikWithDOB(nik, tempatTglLahir, jenisKelamin) {
-  const dateMatch = tempatTglLahir.match(/(\d{2})-(\d{2})-(\d{2,4})/);
-  if (!dateMatch) return nik;
+export function repairNikWithDOB(nik, tempatTglLahir, jenisKelamin) {
+  if (!nik || nik.length < 16) return nik;
 
-  let day = parseInt(dateMatch[1], 10);
-  const month = dateMatch[2];
-  const year = dateMatch[3].slice(-2);
+  const dateMatch = tempatTglLahir ? tempatTglLahir.match(/(\d{2})-(\d{2})-(\d{2,4})/) : null;
 
-  const isPerempuan = jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN');
-  if (isPerempuan) day += 40;
+  let prefix   = nik.substring(0, 6);
+  let nikDob   = nik.substring(6, 12);
+  let sequence = nik.substring(12, 16);
 
-  const expectedDay = day < 10 ? `0${day}` : `${day}`;
-  const expectedDob = expectedDay + month + year;
-
-  const prefix   = nik.substring(0, 6);
-  const nikDob   = nik.substring(6, 12);
-  const sequence = nik.substring(12, 16);
-
-  if (/^\d{6}$/.test(expectedDob) && nikDob !== expectedDob) {
-    console.log(`[NIK Repair] Was: ${nikDob} → Should be: ${expectedDob}`);
-    return prefix + expectedDob + sequence;
+  // Fix sequence number OCR shift: e.g. "0040" -> "0004"
+  // In Dukcapil (UU Adminduk), daily registration sequence starts from 0001.
+  // Dot matrix OCR often misreads "0004" as "0040" due to trailing space noise.
+  if (/^00[1-9]0$/.test(sequence)) {
+    const digit = sequence[2];
+    console.log(`[NIK Sequence Repair] ${sequence} → 000${digit}`);
+    sequence = `000${digit}`;
   }
-  return nik;
+
+  if (dateMatch) {
+    let day = parseInt(dateMatch[1], 10);
+    const month = dateMatch[2];
+    const year = dateMatch[3].slice(-2);
+
+    const isPerempuan = jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN');
+    if (isPerempuan) day += 40;
+
+    const expectedDay = day < 10 ? `0${day}` : `${day}`;
+    const expectedDob = expectedDay + month + year;
+
+    if (/^\d{6}$/.test(expectedDob)) {
+      nikDob = expectedDob;
+    }
+  }
+
+  return prefix + nikDob + sequence;
 }
 
 function cleanName(raw) {
