@@ -1,16 +1,7 @@
 /**
- * AI-Level Smart e-KTP Left-Region Parser with Strict 16-Digit NIK Lock
+ * Ultra AI e-KTP Parser powered by Fuse.js Fuzzy Engine & DOB Cross-Validation
  */
-
-const INDONESIA_CITIES = [
-  'KABUPATEN GRESIK', 'KABUPATEN PEKALONGAN', 'KABUPATEN SEMARANG', 'KOTA SEMARANG',
-  'KOTA SURABAYA', 'KABUPATEN SIDOARJO', 'KABUPATEN MOJOKERTO', 'KABUPATEN PASURUAN',
-  'KABUPATEN MALANG', 'KOTA MALANG', 'KABUPATEN BANYUWANGI', 'KABUPATEN JEMBER',
-  'KABUPATEN KEDIRI', 'KABUPATEN LAMONGAN', 'KABUPATEN TUBAN', 'KABUPATEN BOJONEGORO',
-  'KABUPATEN DEMAK', 'KABUPATEN KUDUS', 'KABUPATEN JEPARA', 'KABUPATEN PATI',
-  'KOTA BANDUNG', 'KABUPATEN BOGOR', 'KOTA BEKASI', 'KOTA TANGERANG', 'KOTA DEPOK',
-  'JAKARTA BARAT', 'JAKARTA PUSAT', 'JAKARTA SELATAN', 'JAKARTA TIMUR', 'JAKARTA UTARA'
-];
+import { matchFuzzyProvince, matchFuzzyCity } from './indonesiaData';
 
 export function parseKTPText(rawText) {
   if (!rawText) return getDefaultKTPData();
@@ -55,15 +46,17 @@ export function parseKTPText(rawText) {
     const line = lines[i];
     const upper = line.toUpperCase();
 
-    // PROVINSI
-    if (upper.includes('PROV')) {
-      data.provinsi = upper.replace(/.*PROV[IINSI]*\s*/i, '').replace(/^[:;\s]+/, '').trim();
+    // PROVINSI (Using Fuse.js fuzzy match)
+    if (upper.includes('PROV') || i === 0) {
+      if (upper.includes('PROV')) {
+        data.provinsi = matchFuzzyProvince(upper);
+      }
     }
 
-    // KOTA / KABUPATEN (Target Line 2)
+    // KOTA / KABUPATEN (Target Line 2 / Fuse.js)
     if (!data.kota && i <= 3) {
       if (!upper.includes('PROVINSI') && (upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('PEKALONGAN') || i === 1)) {
-        data.kota = parseKotaFuzzy(line);
+        data.kota = matchFuzzyCity(line, rawText);
       }
     }
 
@@ -163,11 +156,13 @@ export function parseKTPText(rawText) {
     }
   }
 
-  // 2. Kota / Kabupaten Fallback
+  // 2. Kota / Kabupaten Fallback with Fuse.js
   if (!data.kota || data.kota.includes('PROVINSI') || data.kota.length < 4) {
-    if (rawText.toUpperCase().includes('GRESIK') || rawText.toUpperCase().includes('MENGANTI') || rawText.toUpperCase().includes('SETRO')) {
-      data.kota = 'KABUPATEN GRESIK';
-    }
+    data.kota = matchFuzzyCity(data.kota || '', rawText);
+  }
+
+  if (!data.provinsi) {
+    data.provinsi = matchFuzzyProvince(lines[0] || rawText);
   }
 
   // 3. NIK Extraction & AI Cross-Validation (STRICT 16 DIGITS)
@@ -206,7 +201,6 @@ export function parseKTPText(rawText) {
     data.nik = repairNikWithDOB(data.nik, data.tempatTglLahir, data.jenisKelamin);
   }
 
-  // Guarantee NIK is exactly 16 digits
   if (data.nik && data.nik.length > 16) {
     data.nik = data.nik.substring(0, 16);
   }
@@ -214,16 +208,13 @@ export function parseKTPText(rawText) {
   return data;
 }
 
-/**
- * AI Smart NIK Repair - Strict 16-Digit Output
- */
 function repairNikWithDOB(rawNik, tempatTglLahir, jenisKelamin) {
   const dateMatch = tempatTglLahir.match(/(\d{2})[\-\/](\d{2})[\-\/](\d{4}|\d{2})/);
   if (!dateMatch) return rawNik.substring(0, 16);
 
   let day = parseInt(dateMatch[1], 10);
   const monthStr = dateMatch[2];
-  const yearStr = dateMatch[3].slice(-2); // e.g. '04' from 2004
+  const yearStr = dateMatch[3].slice(-2);
 
   if (jenisKelamin && jenisKelamin.toUpperCase().includes('PEREMPUAN')) {
     day += 40;
@@ -233,26 +224,10 @@ function repairNikWithDOB(rawNik, tempatTglLahir, jenisKelamin) {
   const expectedDobDigits = `${expectedDayStr}${monthStr}${yearStr}`; // '200404'
 
   const prefix = rawNik.substring(0, 6);
-  const sequence = rawNik.substring(12, 16) || '0004'; // Exactly 4 digits
+  const sequence = rawNik.substring(12, 16) || '0004';
 
   const repairedNik = `${prefix}${expectedDobDigits}${sequence}`;
-  return repairedNik.substring(0, 16); // Guarantee 16 digits
-}
-
-function parseKotaFuzzy(text) {
-  const upper = text.toUpperCase();
-  if (upper.includes('GRESIK') || upper.includes('GRESH') || upper.includes('GREEN')) return 'KABUPATEN GRESIK';
-  if (upper.includes('PEKALONGAN')) return 'KABUPATEN PEKALONGAN';
-  if (upper.includes('SEMARANG')) return upper.includes('KOTA') ? 'KOTA SEMARANG' : 'KABUPATEN SEMARANG';
-  if (upper.includes('SURABAYA')) return 'KOTA SURABAYA';
-
-  for (const city of INDONESIA_CITIES) {
-    if (upper.includes(city)) return city;
-  }
-
-  const cleaned = text.replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '').replace(/^[:;\s]+/, '').trim();
-  if (cleaned && !cleaned.includes('PROVINSI')) return `KABUPATEN ${cleaned}`;
-  return 'KABUPATEN GRESIK'; // Smart default for e-KTP
+  return repairedNik.substring(0, 16);
 }
 
 function cleanName(raw) {
