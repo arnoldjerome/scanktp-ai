@@ -119,6 +119,12 @@ export default function App() {
 
       // Initialize Tesseract worker (Indonesian + English)
       const worker = await createWorker('ind+eng');
+      
+      // Configure Tesseract parameters for e-KTP card layout
+      await worker.setParameters({
+        tessedit_pageseg_mode: '6', // Assume a single uniform block of text
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:-/, \n'
+      });
 
       let combinedRawText = '';
       for (let i = 0; i < imageSources.length; i++) {

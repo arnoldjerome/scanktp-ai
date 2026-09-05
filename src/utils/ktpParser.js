@@ -1,166 +1,189 @@
 /**
- * Indonesian e-KTP Text Parser
- * Cleans raw OCR text output and extracts structured e-KTP fields using regex and fuzzy matching.
+ * Advanced e-KTP Fuzzy Parser
+ * Designed to extract Indonesian ID Card fields even from imperfect OCR outputs.
  */
 
 export function parseKTPText(rawText) {
   if (!rawText) return getDefaultKTPData();
+
+  const data = getDefaultKTPData();
+  data.rawText = rawText;
 
   const lines = rawText
     .split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0);
 
-  const data = getDefaultKTPData();
-  data.rawText = rawText;
-
-  // Helper function to extract text after colon or label
-  const getValueAfterKey = (line, keys) => {
+  // Helper to extract text after key or delimiter
+  const getValue = (line, keys) => {
     for (const key of keys) {
       const idx = line.toUpperCase().indexOf(key.toUpperCase());
       if (idx !== -1) {
         let remainder = line.substring(idx + key.length).trim();
-        // Remove leading colons or special chars
-        remainder = remainder.replace(/^[:;\s\-\.=]+/, '').trim();
-        return remainder;
+        return remainder.replace(/^[:;\s\-\.=]+/, '').trim();
       }
     }
     return '';
   };
 
-  // 1. Provinsi & Kota/Kabupaten
-  for (let i = 0; i < Math.min(lines.length, 5); i++) {
-    const uppercaseLine = lines[i].toUpperCase();
-    if (uppercaseLine.includes('PROVINSI')) {
-      data.provinsi = uppercaseLine.replace(/.*PROVINSI\s*/, '').replace(/^[:;\s]+/, '').trim();
-    } else if (uppercaseLine.includes('KOTA') || uppercaseLine.includes('KABUPATEN') || uppercaseLine.includes('JAKARTA')) {
-      if (!uppercaseLine.includes('PROVINSI')) {
-        data.kota = uppercaseLine.replace(/^[:;\s]+/, '').trim();
-      }
-    }
+  // 1. Standalone NIK Search (16 Digits)
+  // Scan entire raw text for 16-digit candidates (fixing common digit OCR errors)
+  const fullCleanedDigitsText = rawText
+    .replace(/[O]/gi, '0')
+    .replace(/[Il|i]/g, '1')
+    .replace(/[S]/gi, '5')
+    .replace(/[B]/gi, '8')
+    .replace(/[Z]/gi, '2')
+    .replace(/[gq]/gi, '9');
+
+  // Match 16 consecutive digits anywhere
+  const nikMatch = fullCleanedDigitsText.match(/\b\d{16}\b/);
+  if (nikMatch) {
+    data.nik = nikMatch[0];
   }
 
-  // Iterate lines for standard fields
+  let nikLineIndex = -1;
+
+  // Process line by line
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
 
-    // 2. NIK (16 Digits)
-    if (upper.includes('NIK') || upper.match(/\b\d{14,17}\b/) || upper.match(/3[0-9I1lO0]{15}/)) {
-      const val = getValueAfterKey(line, ['NIK']);
-      // Clean digits (fix OCR 0 vs O, 1 vs I/l)
-      let cleanedDigits = (val || line)
-        .replace(/O/g, '0')
-        .replace(/[Il|]/g, '1')
-        .replace(/S/g, '5')
-        .replace(/B/g, '8')
-        .replace(/\D/g, '');
-
-      if (cleanedDigits.length >= 15) {
-        data.nik = cleanedDigits.substring(0, 16);
-      } else if (val) {
-        data.nik = val;
+    // 2. Provinsi & Kota/Kabupaten
+    if (upper.includes('PROVINSI') || upper.includes('PROV')) {
+      data.provinsi = upper.replace(/.*PROVINSI\s*/i, '').replace(/^[:;\s]+/, '').trim();
+    } else if (upper.includes('KABUPATEN') || upper.includes('KOTA') || upper.includes('JAKARTA')) {
+      if (!upper.includes('PROVINSI')) {
+        data.kota = upper.replace(/^[:;\s]+/, '').trim();
       }
     }
 
-    // 3. Nama
-    if (upper.includes('NAMA') && !upper.includes('NEGARA') && !upper.includes('AGAMA')) {
-      const val = getValueAfterKey(line, ['NAMA']);
-      if (val) data.nama = val.replace(/[^A-Za-z\s\.,']/g, '').trim();
+    // 3. NIK Line Detection if not captured above
+    if (upper.includes('NIK') || upper.includes('N1K') || upper.includes('NI K')) {
+      nikLineIndex = i;
+      if (!data.nik) {
+        const val = getValue(line, ['NIK', 'N1K', 'NI K']);
+        const cleaned = val
+          .replace(/[O]/gi, '0')
+          .replace(/[Il|i]/g, '1')
+          .replace(/[S]/gi, '5')
+          .replace(/[B]/gi, '8')
+          .replace(/\D/g, '');
+        if (cleaned.length >= 15) {
+          data.nik = cleaned.substring(0, 16);
+        } else if (val) {
+          data.nik = val;
+        }
+      }
     }
 
-    // 4. Tempat/Tgl Lahir
-    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('TGL')) {
-      const val = getValueAfterKey(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR']);
+    // 4. Nama (Check key 'NAMA' or line immediately following NIK line)
+    if (upper.includes('NAMA') && !upper.includes('NEGARA') && !upper.includes('AGAMA')) {
+      const val = getValue(line, ['NAMA', 'NAMA:']);
+      if (val) data.nama = cleanName(val);
+    } else if (nikLineIndex !== -1 && i === nikLineIndex + 1 && !data.nama) {
+      // Positional fallback: line right after NIK
+      if (!upper.includes('TEMPAT') && !upper.includes('LAHIR')) {
+        data.nama = cleanName(line.replace(/^[:;\s]+/, ''));
+      }
+    }
+
+    // 5. Tempat / Tgl Lahir
+    if (upper.includes('TEMPAT') || upper.includes('LAHIR') || upper.includes('TGL') || upper.match(/\b\d{2}[\-\/]\d{2}[\-\/]\d{4}\b/)) {
+      const val = getValue(line, ['TEMPAT/TGL LAHIR', 'TEMPAT TGL LAHIR', 'TEMPAT/TGL', 'LAHIR', 'TEMPAT']);
       if (val) {
         data.tempatTglLahir = val;
+      } else {
+        const dateMatch = upper.match(/([A-Z\s]+)?,?\s*(\d{2}[\-\/]\d{2}[\-\/]\d{4})/);
+        if (dateMatch) {
+          data.tempatTglLahir = line;
+        }
       }
     }
 
-    // 5. Jenis Kelamin & Gol Darah
-    if (upper.includes('JENIS KELAMIN') || upper.includes('KELAMIN') || upper.includes('LAKI') || upper.includes('PEREMPUAN')) {
+    // 6. Jenis Kelamin & Gol Darah
+    if (upper.includes('KELAMIN') || upper.includes('LAKI') || upper.includes('PEREMPUAN')) {
       if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
       else if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
 
-      if (upper.includes('GOL') || upper.includes('DARAH')) {
-        const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O]+)/i);
-        if (golMatch) {
-          data.golDarah = golMatch[1];
-        }
+      const golMatch = upper.match(/GOL\.?\s*DARAH\s*:?\s*([A-B-O\-]+)/i) || upper.match(/\b(A|B|AB|O|-)\b/);
+      if (golMatch && upper.includes('GOL')) {
+        data.golDarah = golMatch[1] || '-';
       }
-    } else if (upper.includes('GOL. DARAH') || upper.includes('GOL DARAH')) {
-      const gol = getValueAfterKey(line, ['GOL. DARAH', 'GOL DARAH', 'DARAH']);
-      if (gol) data.golDarah = gol.substring(0, 3).trim();
     }
 
-    // 6. Alamat
+    // 7. Alamat
     if (upper.includes('ALAMAT')) {
-      const val = getValueAfterKey(line, ['ALAMAT']);
+      const val = getValue(line, ['ALAMAT']);
       if (val) data.alamat = val;
     }
 
-    // 7. RT/RW
-    if (upper.includes('RT/') || upper.includes('RT /') || upper.includes('RT/RW') || upper.match(/\bRT\b/)) {
-      const val = getValueAfterKey(line, ['RT/RW', 'RT / RW', 'RT']);
+    // 8. RT / RW (Pattern 000/000)
+    const rtRwMatch = upper.match(/\b\d{2,3}\s*[\/\\]\s*\d{2,3}\b/);
+    if (rtRwMatch) {
+      data.rtRw = rtRwMatch[0].replace(/\s+/g, '');
+    } else if (upper.includes('RT/') || upper.includes('RT /') || upper.includes('RT')) {
+      const val = getValue(line, ['RT/RW', 'RT / RW', 'RT']);
       if (val) data.rtRw = val;
     }
 
-    // 8. Kel/Desa
+    // 9. Kel / Desa
     if (upper.includes('KEL') || upper.includes('DESA') || upper.includes('KELURAHAN')) {
-      const val = getValueAfterKey(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
+      const val = getValue(line, ['KEL/DESA', 'KEL / DESA', 'KELURAHAN', 'DESA', 'KEL']);
       if (val) data.kelDesa = val;
     }
 
-    // 9. Kecamatan
+    // 10. Kecamatan
     if (upper.includes('KECAMATAN') || upper.includes('KEC')) {
-      const val = getValueAfterKey(line, ['KECAMATAN', 'KEC']);
+      const val = getValue(line, ['KECAMATAN', 'KEC']);
       if (val) data.kecamatan = val;
     }
 
-    // 10. Agama
-    if (upper.includes('AGAMA')) {
-      const val = getValueAfterKey(line, ['AGAMA']);
-      if (val) {
-        data.agama = normalizeAgama(val);
-      }
+    // 11. Agama
+    if (upper.includes('AGAMA') || upper.includes('ISLAM') || upper.includes('KRISTEN') || upper.includes('HINDU') || upper.includes('BUDDHA')) {
+      const val = getValue(line, ['AGAMA']) || line;
+      if (val) data.agama = normalizeAgama(val);
     }
 
-    // 11. Status Perkawinan
-    if (upper.includes('STATUS') || upper.includes('PERKAWINAN') || upper.includes('KAWIN')) {
-      const val = getValueAfterKey(line, ['STATUS PERKAWINAN', 'STATUS', 'PERKAWINAN']);
-      if (val) {
-        if (val.toUpperCase().includes('BELUM')) data.statusPerkawinan = 'BELUM KAWIN';
-        else if (val.toUpperCase().includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
-        else if (val.toUpperCase().includes('CERAI HIDUP')) data.statusPerkawinan = 'CERAI HIDUP';
-        else if (val.toUpperCase().includes('KAWIN')) data.statusPerkawinan = 'KAWIN';
-        else data.statusPerkawinan = val;
-      }
+    // 12. Status Perkawinan
+    if (upper.includes('KAWIN') || upper.includes('STATUS') || upper.includes('PERKAWINAN')) {
+      if (upper.includes('BELUM')) data.statusPerkawinan = 'BELUM KAWIN';
+      else if (upper.includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
+      else if (upper.includes('CERAI HIDUP')) data.statusPerkawinan = 'CERAI HIDUP';
+      else if (upper.includes('KAWIN')) data.statusPerkawinan = 'KAWIN';
     }
 
-    // 12. Pekerjaan
-    if (upper.includes('PEKERJAAN')) {
-      const val = getValueAfterKey(line, ['PEKERJAAN']);
+    // 13. Pekerjaan
+    if (upper.includes('PEKERJAAN') || upper.includes('PEDAGANG') || upper.includes('SWASTA') || upper.includes('PNS') || upper.includes('WIRASWASTA') || upper.includes('PELAJAR')) {
+      const val = getValue(line, ['PEKERJAAN']);
       if (val) data.pekerjaan = val;
+      else if (!upper.includes('PEKERJAAN')) data.pekerjaan = line;
     }
 
-    // 13. Kewarganegaraan
+    // 14. Kewarganegaraan
     if (upper.includes('KEWARGANEGARAAN') || upper.includes('WNI') || upper.includes('WNA')) {
       if (upper.includes('WNI')) data.kewarganegaraan = 'WNI';
       else if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
-      else {
-        const val = getValueAfterKey(line, ['KEWARGANEGARAAN']);
-        if (val) data.kewarganegaraan = val;
-      }
     }
 
-    // 14. Berlaku Hingga
-    if (upper.includes('BERLAKU') || upper.includes('HINGGA') || upper.includes('SEUMUR')) {
-      const val = getValueAfterKey(line, ['BERLAKU HINGGA', 'BERLAKU']);
-      if (val) data.berlakuHingga = val;
+    // 15. Berlaku Hingga
+    if (upper.includes('BERLAKU') || upper.includes('SEUMUR') || upper.includes('HINGGA')) {
+      if (upper.includes('SEUMUR')) data.berlakuHingga = 'SEUMUR HIDUP';
+      else {
+        const val = getValue(line, ['BERLAKU HINGGA', 'BERLAKU']);
+        if (val) data.berlakuHingga = val;
+      }
     }
   }
 
   return data;
+}
+
+function cleanName(raw) {
+  return raw
+    .replace(/[^A-Za-z\s\.,']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function normalizeAgama(raw) {
@@ -171,7 +194,7 @@ function normalizeAgama(raw) {
   if (upper.includes('HINDU')) return 'HINDU';
   if (upper.includes('BUDDHA') || upper.includes('BUDHA')) return 'BUDDHA';
   if (upper.includes('KHONGHUCU') || upper.includes('KONGHUCU')) return 'KHONGHUCU';
-  return raw;
+  return raw.replace(/AGAMA\s*:?/i, '').trim();
 }
 
 export function getDefaultKTPData() {
@@ -196,9 +219,6 @@ export function getDefaultKTPData() {
   };
 }
 
-/**
- * Formats a single parsed KTP object into clean text for copying to clipboard
- */
 export function formatKTPForClipboard(ktp, index = null) {
   const header = index !== null ? `=== DATA KTP #${index + 1} ===` : `=== DATA KTP ===`;
   
@@ -223,9 +243,6 @@ export function formatKTPForClipboard(ktp, index = null) {
   ].filter(Boolean).join('\n');
 }
 
-/**
- * Formats all KTP objects into a combined clipboard text string
- */
 export function formatAllKTPsForClipboard(ktpList) {
   if (!ktpList || ktpList.length === 0) return '';
   return ktpList
