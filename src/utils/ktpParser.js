@@ -1,6 +1,6 @@
 /**
- * Ultra-Resilient e-KTP Fuzzy & Positional Parser
- * Precision NIK colon isolation & Kota/Kabupaten lock.
+ * Super-Resilient e-KTP Fuzzy & Positional Parser
+ * Precision NIK colon artifact stripping & Kota/Kabupaten lock.
  */
 
 export function parseKTPText(rawText) {
@@ -44,14 +44,19 @@ export function parseKTPText(rawText) {
   };
 
   // 1. NIK Extraction (Target: 16 digits)
-  // Find NIK line and strip 'NIK' and ':' BEFORE converting digits
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const upper = line.toUpperCase();
     if (upper.includes('NIK') || upper.includes('N1K') || upper.includes('NI K') || upper.includes('N.I.K') || i === 2) {
       const valAfterNik = getValueAfterKey(line, ['NIK', 'N1K', 'NI K', 'N.I.K']);
-      const digitsOnly = cleanDigitsOnly(valAfterNik);
-      if (digitsOnly.length >= 14) {
+      let digitsOnly = cleanDigitsOnly(valAfterNik);
+
+      // If colon artifact '1' prepended (e.g. 13374052004040004 -> 17 digits), strip leading '1'
+      if (digitsOnly.length === 17 && digitsOnly.startsWith('13')) {
+        digitsOnly = digitsOnly.substring(1);
+      }
+
+      if (digitsOnly.length >= 15) {
         data.nik = digitsOnly.substring(0, 16);
         break;
       }
@@ -60,9 +65,17 @@ export function parseKTPText(rawText) {
 
   // Strategy B: Scan whole rawText if NIK line was missed
   if (!data.nik) {
-    // Remove the word NIK first
     const noNikText = rawText.replace(/NIK/gi, '');
-    const cleanedRawDigits = cleanDigitsOnly(noNikText);
+    let cleanedRawDigits = cleanDigitsOnly(noNikText);
+    
+    // Check for leading '1' artifact
+    if (cleanedRawDigits.length >= 17 && cleanedRawDigits.includes('13374')) {
+      const idx = cleanedRawDigits.indexOf('3374');
+      if (idx !== -1) {
+        cleanedRawDigits = cleanedRawDigits.substring(idx);
+      }
+    }
+
     const m = cleanedRawDigits.match(/\d{16}/);
     if (m) {
       data.nik = m[0];
@@ -79,18 +92,17 @@ export function parseKTPText(rawText) {
       data.provinsi = upper.replace(/.*PROV[IINSI]*\s*/i, '').replace(/^[:;\s]+/, '').trim();
     }
 
-    // KOTA / KABUPATEN (ONLY set once or from top 3 header lines)
-    if (!data.kota || i < 3) {
-      if (upper.includes('KABUPATEN') || upper.includes('KAB') || upper.includes('KOTA')) {
+    // KOTA / KABUPATEN (ONLY set once from line 0, 1, or 2, and NEVER overwrite!)
+    if (!data.kota && i <= 3) {
+      if (upper.includes('KABUPATEN') || upper.includes('KAB') || upper.includes('KOTA') || upper.includes('GRESIK') || upper.includes('PEKALONGAN')) {
         if (!upper.includes('PROVINSI') && !upper.includes('PEKERJAAN')) {
           let cityVal = upper
             .replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '')
             .replace(/^[:;\s]+/, '')
             .trim();
-          data.kota = cityVal || line.replace(/.*(?:KABUPATEN|KAB|KOTA)\s*/i, '').trim();
+          data.kota = cityVal || line.replace(/^[:;\s]+/, '').trim();
         }
       } else if (i === 1 && !upper.includes('PROVINSI') && !upper.includes('NIK')) {
-        // Line 2 is standard e-KTP Kota/Kabupaten line
         data.kota = line.replace(/^[:;\s]+/, '').trim();
       }
     }
@@ -172,7 +184,7 @@ export function parseKTPText(rawText) {
       const val = getValueAfterKey(line, ['PEKERJAAN']);
       if (val) {
         // Strip bottom issuance city/date if appended
-        data.pekerjaan = val.replace(/\s*GRESIK.*$/i, '').trim();
+        data.pekerjaan = val.replace(/\s*GRESIK.*$/i, '').replace(/\s*\d{2}[\-\/]\d{2}[\-\/]\d{4}.*$/i, '').trim();
       }
     }
 
