@@ -8,13 +8,29 @@ import ApiKeyModal from './components/ApiKeyModal';
 import { preprocessImageForOCR, preprocessImageForGemini } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
 import { parseKTPText } from './utils/ktpParser';
-import { scanKTPWithGemini } from './utils/geminiOCR';
+import { scanKTPWithGemini, parseKTPTextWithGemini } from './utils/geminiOCR';
 import { SAMPLE_PARSED_KTP } from './utils/sampleKtp';
 import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key } from 'lucide-react';
 
 const STORAGE_KEY = 'scanktp_gemini_api_key';
 // Default key from Vercel environment variable (set in Vercel dashboard, never committed to git)
 const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+
+/** Merge two KTP data objects — prefer non-empty, longer, or first result per field */
+function mergeKTPData(primary, secondary) {
+  const merged = { ...primary };
+  const SKIP = ['rawText'];
+  for (const key of Object.keys(merged)) {
+    if (SKIP.includes(key)) continue;
+    const pVal = (primary[key] || '').trim();
+    const sVal = (secondary[key] || '').trim();
+    // Use secondary if primary is empty/short and secondary has content
+    if ((!pVal || pVal.length < 2) && sVal && sVal.length > 1) {
+      merged[key] = sVal;
+    }
+  }
+  return merged;
+}
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -124,57 +140,85 @@ export default function App() {
     updateItemStatus(index, { status: 'processing', progress: 5, error: null });
 
     try {
-      // === STRATEGY 1: Gemini Vision API (primary) ===
+      // ── Prepare image sources ─────────────────────────────────────────────
+      let imageFile = null;
+      let imageSources = [];
+
+      if (item.file) {
+        if (item.file.type === 'application/pdf') {
+          const pages = await convertPdfToImages(item.file);
+          if (pages.length === 0) throw new Error('PDF kosong');
+          imageSources = pages;
+        } else {
+          imageFile = item.file;
+          const preprocessed = await preprocessImageForOCR(item.file);
+          imageSources = [preprocessed];
+        }
+      } else if (item.previewUrl) {
+        imageSources = [item.previewUrl];
+      } else {
+        throw new Error('Tidak ada sumber gambar');
+      }
+
+      if (imageSources.length === 0) throw new Error('Tidak ada sumber gambar yang valid');
+
+      // ── STEP 1: Tesseract OCR → raw text ─────────────────────────────────
+      updateItemStatus(index, { progress: 15 });
+      const worker = await createWorker('ind+eng');
+      await worker.setParameters({
+        tessedit_pageseg_mode: '4',
+        tessedit_ocr_engine_mode: '1',
+        preserve_interword_spaces: '1',
+      });
+
+      let rawOCRText = '';
+      for (let i = 0; i < imageSources.length; i++) {
+        const result = await worker.recognize(imageSources[i]);
+        rawOCRText += result.data.text + '\n';
+        updateItemStatus(index, { progress: 15 + Math.round(((i + 1) / imageSources.length) * 25) });
+      }
+      await worker.terminate();
+
+      console.log('[Hybrid OCR] Tesseract raw text:\n', rawOCRText.substring(0, 800));
+
+      // ── STEP 2a: Gemini parses raw text → JSON (no image vision) ─────────
       if (apiKey && apiKey.trim()) {
         try {
-          updateItemStatus(index, { progress: 15 });
+          updateItemStatus(index, { progress: 50 });
+          const parsedData = await parseKTPTextWithGemini(rawOCRText, apiKey);
 
-          let imageSource;
-          if (item.file) {
-            if (item.file.type === 'application/pdf') {
-              const pages = await convertPdfToImages(item.file);
-              if (pages.length === 0) throw new Error('PDF kosong');
-              imageSource = pages[0];
-            } else {
-              // Send raw file directly to Gemini — Vision AI handles real photos natively
-              // No canvas preprocessing needed (it can break the image)
-              imageSource = item.file;
-            }
-          } else if (item.previewUrl) {
-            imageSource = item.previewUrl;
-          } else {
-            throw new Error('Tidak ada sumber gambar');
-          }
-
-          updateItemStatus(index, { progress: 40 });
-          const parsedData = await scanKTPWithGemini(imageSource, apiKey);
-
-          // Retry with enhanced image if too many fields empty
           const filledCount = Object.values(parsedData).filter(
             v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
           ).length;
 
-          if (filledCount < 5 && item.file && !item.file.type.includes('pdf')) {
-            console.log(`[Gemini] Only ${filledCount} fields filled, retrying with enhanced image...`);
-            updateItemStatus(index, { progress: 60 });
-            const enhanced = await preprocessImageForGemini(item.file);
-            const parsedData2 = await scanKTPWithGemini(enhanced, apiKey);
-            const filledCount2 = Object.values(parsedData2).filter(
-              v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
-            ).length;
-            // Use whichever result has more fields
-            if (filledCount2 > filledCount) {
-              updateItemStatus(index, { status: 'done', progress: 100, parsedData: parsedData2, engine: 'gemini' });
-              return;
+          console.log(`[Hybrid OCR] Gemini text-parse: ${filledCount}/16 fields`);
+
+          if (filledCount >= 5) {
+            let finalData = parsedData;
+
+            // Also try Gemini Vision for comparison, merge best of both
+            if (imageFile && filledCount < 13) {
+              try {
+                updateItemStatus(index, { progress: 70 });
+                const geminiPreprocessed = await preprocessImageForGemini(imageFile);
+                const visionData = await scanKTPWithGemini(geminiPreprocessed, apiKey);
+                const visionFilled = Object.values(visionData).filter(
+                  v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
+                ).length;
+                console.log(`[Hybrid OCR] Gemini Vision: ${visionFilled}/16 fields`);
+                finalData = mergeKTPData(parsedData, visionData);
+              } catch (visionErr) {
+                console.warn('[Hybrid OCR] Vision merge skipped:', visionErr.message);
+              }
             }
+
+            updateItemStatus(index, { status: 'done', progress: 100, parsedData: finalData, engine: 'gemini' });
+            return;
           }
 
-          updateItemStatus(index, { status: 'done', progress: 100, parsedData, engine: 'gemini' });
-          return;
-
+          console.warn('[Hybrid OCR] Too few fields from Gemini, using basic parser');
         } catch (geminiErr) {
-          console.error('[Gemini Error]', geminiErr.message);
-
+          console.error('[Gemini Text Parse Error]', geminiErr.message);
           if (geminiErr.message === 'API_KEY_INVALID') {
             updateItemStatus(index, {
               status: 'error', progress: 0,
@@ -183,64 +227,21 @@ export default function App() {
             });
             return;
           }
-
-          // Show Gemini error to user with fallback notification
-          const errMsg = geminiErr.message || 'Unknown error';
-          console.warn(`[Gemini] Gagal (${errMsg}), falling back to Tesseract...`);
-          updateItemStatus(index, { progress: 30 });
+          console.warn('[Hybrid OCR] Gemini failed, falling back to basic parser');
         }
       }
 
-      // === STRATEGY 2: Tesseract OCR (fallback / no API key) ===
-      updateItemStatus(index, { progress: 35 });
-
-      let imageSources = [];
-      if (item.file) {
-        if (item.file.type === 'application/pdf') {
-          imageSources = await convertPdfToImages(item.file);
-        } else {
-          const preprocessed = await preprocessImageForOCR(item.file);
-          imageSources = [preprocessed];
-        }
-      } else if (item.previewUrl) {
-        imageSources = [item.previewUrl];
-      }
-
-      if (imageSources.length === 0) throw new Error('Tidak ada sumber gambar yang valid');
-
-      const worker = await createWorker('ind+eng');
-      await worker.setParameters({
-        tessedit_pageseg_mode: '4',   // Single column of variable-size text — best for KTP layout
-        tessedit_ocr_engine_mode: '1', // LSTM neural net only — more accurate than legacy
-        preserve_interword_spaces: '1', // Keep spaces between words
-      });
-
-      let combinedRawText = '';
-      for (let i = 0; i < imageSources.length; i++) {
-        const result = await worker.recognize(imageSources[i]);
-        combinedRawText += result.data.text + '\n';
-        const p = 35 + Math.round(((i + 1) / imageSources.length) * 55);
-        updateItemStatus(index, { progress: p });
-      }
-
-      await worker.terminate();
-
-      const parsedData = parseKTPText(combinedRawText);
-
-      updateItemStatus(index, {
-        status: 'done',
-        progress: 100,
-        parsedData,
-        engine: 'tesseract'
-      });
+      // ── STEP 2b: Fallback — basic KTP text parser ────────────────────────
+      updateItemStatus(index, { progress: 85 });
+      const parsedData = parseKTPText(rawOCRText);
+      updateItemStatus(index, { status: 'done', progress: 100, parsedData, engine: 'tesseract' });
 
     } catch (err) {
       console.error('Scan error:', err);
       updateItemStatus(index, {
-        status: 'error',
-        progress: 0,
+        status: 'error', progress: 0,
         error: err.message || 'Gagal melakukan scan',
-        engine: null
+        engine: null,
       });
     }
   };

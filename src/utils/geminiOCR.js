@@ -543,3 +543,75 @@ function safeValidateNIK(nik, tempatTglLahir, jenisKelamin) {
   }
   return nik;
 }
+
+
+// ─── parseKTPTextWithGemini: Text-only parsing (no image vision) ──────────────
+/**
+ * Given raw OCR text from Tesseract, use Gemini to parse it into structured JSON.
+ * Much more reliable than Gemini Vision because there is no image ambiguity.
+ */
+export async function parseKTPTextWithGemini(rawText, apiKey) {
+  if (!apiKey?.trim()) throw new Error('GEMINI_API_KEY_REQUIRED');
+  if (!rawText?.trim()) throw new Error('Raw OCR text is empty');
+
+  const { apiVersion, modelName } = await discoverModel(apiKey.trim());
+  console.log('[Gemini Text Parse] Using:', modelName);
+
+  const prompt = [
+    'You are an expert at parsing Indonesian KTP (National ID Card) OCR text.',
+    '',
+    'The following is raw text extracted by Tesseract OCR from an Indonesian e-KTP card.',
+    'Some characters may be misread (common: O vs 0, l vs 1, B vs 8).',
+    '',
+    'RAW OCR TEXT:',
+    '---',
+    rawText,
+    '---',
+    '',
+    'Extract these 16 fields and return ONLY valid JSON (no other text):',
+    '',
+    '- provinsi: Province name starting with PROVINSI (e.g. "PROVINSI JAWA TIMUR")',
+    '- kota: City/Regency e.g. "KABUPATEN GRESIK" or "KOTA SEMARANG"',
+    '- nik: Exactly 16 digits. Fix: O->0, l/I->1, B->8. Read each digit carefully.',
+    '- nama: Full name e.g. "ARNOLD JEROME CANDRA"',
+    '- tempatTglLahir: "CITY, DD-MM-YYYY" e.g. "SEMARANG, 20-04-2004"',
+    '- jenisKelamin: Exactly "LAKI-LAKI" or "PEREMPUAN"',
+    '- golDarah: A, B, AB, O, or - if not found',
+    '- alamat: Street address only, no RT/RW e.g. "JL. DUSUN PENGAMPUN"',
+    '- rtRw: "014/007" format with leading zeros',
+    '- kelDesa: Village name e.g. "SETRO"',
+    '- kecamatan: District name e.g. "MENGANTI"',
+    '- agama: ISLAM, KRISTEN, KATHOLIK, HINDU, BUDDHA, or KHONGHUCU',
+    '- statusPerkawinan: BELUM KAWIN, KAWIN, CERAI HIDUP, or CERAI MATI',
+    '- pekerjaan: Occupation e.g. "BELUM/TIDAK BEKERJA"',
+    '- kewarganegaraan: "WNI" or "WNA"',
+    '- berlakuHingga: "DD-MM-YYYY" or "SEUMUR HIDUP"',
+    '',
+    'Fill ALL 16 fields. Use empty string only if truly not found.',
+    'Return ONLY the JSON object.',
+  ].join('\n');
+
+  let text;
+  try {
+    text = await callGemini({
+      apiVersion, modelName, apiKey: apiKey.trim(),
+      parts: [{ text: prompt }],
+      useSchema: true,
+      temperature: 0.0,
+    });
+  } catch (e) {
+    text = await callGemini({
+      apiVersion, modelName, apiKey: apiKey.trim(),
+      parts: [{ text: prompt }],
+      useSchema: false,
+      temperature: 0.0,
+    });
+  }
+
+  console.log('[Gemini Text Parse] Response:', text.substring(0, 400));
+
+  const parsed = extractJSON(text);
+  if (!parsed) throw new Error('Gemini text parsing returned no valid JSON');
+
+  return normalizeAndValidate(parsed);
+}
