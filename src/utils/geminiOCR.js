@@ -1,20 +1,24 @@
 /**
  * Gemini Vision OCR for e-KTP — Ultra Precision Edition
- * Tries multiple Gemini models (newest first) for maximum compatibility.
- * Uses v1 API (not v1beta) which has broader model support.
+ * Auto-discovers available models via Gemini API, then uses the best one.
+ * Supports both v1 and v1beta API versions.
  */
 
-// Try models in order — newest/most capable first
-const GEMINI_MODELS = [
+// ─── API Configuration ────────────────────────────────────────────────────────
+const API_VERSIONS = ['v1beta', 'v1'];
+const PREFERRED_MODELS = [
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite',
-  'gemini-1.5-flash-latest',
   'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-pro',
   'gemini-1.5-pro-latest',
-  'gemini-pro-vision', // older fallback
+  'gemini-pro-vision',
+  'gemini-pro',
 ];
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1/models';
+// Cache discovered working endpoint
+let cachedEndpoint = null; // { apiVersion, modelName }
 
 // ─── Prompt Engineering ────────────────────────────────────────────────────────
 const KTP_PROMPT = `Kamu adalah mesin ekstraksi data e-KTP Indonesia yang sangat presisi.
@@ -28,7 +32,7 @@ INSTRUKSI WAJIB:
 PANDUAN SETIAP FIELD:
 - "provinsi": Baris paling atas (contoh: "PROVINSI JAWA TIMUR", "PROVINSI DKI JAKARTA"). Selalu diawali kata PROVINSI.
 - "kota": Baris kedua (contoh: "KABUPATEN GRESIK", "KOTA SEMARANG", "JAKARTA BARAT"). JANGAN campur dengan pekerjaan atau data lain.
-- "nik": 16 digit angka persis. Letaknya setelah label "NIK". Baca digit SATU PER SATU dengan teliti. Jangan ganti angka dengan huruf atau sebaliknya. Angka 0 (nol) berbeda dengan O (huruf O). Angka 1 berbeda dengan l (huruf L). Angka 8 berbeda dengan B. Angka 4 berbeda dengan A. Angka 5 berbeda dengan S.
+- "nik": 16 digit angka persis. Letaknya setelah label "NIK". Baca digit SATU PER SATU dengan teliti. Angka 0 (nol) berbeda dengan O (huruf O). Angka 1 berbeda dengan l (huruf L). Angka 8 berbeda dengan B. Angka 4 berbeda dengan A. Angka 5 berbeda dengan S.
 - "nama": Nama lengkap setelah "Nama". Hanya nama, jangan campur data lain.
 - "tempatTglLahir": Format "KOTA, DD-MM-YYYY" (contoh: "JAKARTA, 18-02-1986" atau "SEMARANG, 20-04-2004"). Ambil dari baris "Tempat/Tgl Lahir". JANGAN campur dengan Kewarganegaraan.
 - "jenisKelamin": "LAKI-LAKI" atau "PEREMPUAN". Ambil dari baris "Jenis Kelamin" saja.
@@ -41,14 +45,14 @@ PANDUAN SETIAP FIELD:
 - "statusPerkawinan": Salah satu: BELUM KAWIN, KAWIN, CERAI HIDUP, CERAI MATI.
 - "pekerjaan": Pekerjaan dari baris "Pekerjaan". Baca seluruh teks pekerjaan secara lengkap (contoh: "BELUM/TIDAK BEKERJA", "PEGAWAI SWASTA", "PELAJAR/MAHASISWA").
 - "kewarganegaraan": "WNI" atau "WNA".
-- "berlakuHingga": Tanggal dari baris "Berlaku Hingga" dalam format "DD-MM-YYYY", atau "SEUMUR HIDUP". JANGAN campurkan dua tanggal berbeda. Pilih satu tanggal saja.
+- "berlakuHingga": Tanggal dari baris "Berlaku Hingga" dalam format "DD-MM-YYYY", atau "SEUMUR HIDUP". JANGAN campurkan dua tanggal berbeda.
 
 VALIDASI MANDIRI sebelum output:
 - NIK harus tepat 16 digit angka
-- tempatTglLahir harus mengandung nama kota DAN tanggal, bukan hanya kota
+- tempatTglLahir harus mengandung nama kota DAN tanggal
 - berlakuHingga hanya boleh satu tanggal atau "SEUMUR HIDUP"
 
-Output JSON (isi semua field, kosongkan jika tidak terbaca):
+Output JSON:
 {
   "provinsi": "",
   "kota": "",
@@ -101,9 +105,142 @@ function blobToBase64(blob) {
   });
 }
 
-// ─── Main OCR Function (tries multiple models) ────────────────────────────────
+// ─── Model Discovery ──────────────────────────────────────────────────────────
+/**
+ * Discover available models by calling the list models endpoint.
+ * Returns the best model+apiVersion combo for vision tasks.
+ */
+async function discoverModel(apiKey) {
+  // If we already found a working endpoint, use it
+  if (cachedEndpoint) return cachedEndpoint;
+
+  console.log('[Gemini] Discovering available models...');
+
+  for (const apiVersion of API_VERSIONS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${apiKey}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const models = data.models || [];
+
+      // Log available models for debugging
+      const modelNames = models.map(m => m.name.replace('models/', ''));
+      console.log(`[Gemini] Available models (${apiVersion}):`, modelNames.join(', '));
+
+      // Find the first preferred model that supports generateContent
+      for (const preferred of PREFERRED_MODELS) {
+        const found = models.find(m => {
+          const name = m.name.replace('models/', '');
+          return name === preferred &&
+            m.supportedGenerationMethods &&
+            m.supportedGenerationMethods.includes('generateContent');
+        });
+        if (found) {
+          const modelName = found.name.replace('models/', '');
+          console.log(`[Gemini] Selected model: ${modelName} (${apiVersion})`);
+          cachedEndpoint = { apiVersion, modelName };
+          return cachedEndpoint;
+        }
+      }
+
+      // If no preferred model found, use any vision-capable model
+      const anyVision = models.find(m =>
+        m.supportedGenerationMethods &&
+        m.supportedGenerationMethods.includes('generateContent') &&
+        (m.name.includes('flash') || m.name.includes('pro'))
+      );
+      if (anyVision) {
+        const modelName = anyVision.name.replace('models/', '');
+        console.log(`[Gemini] Using fallback model: ${modelName} (${apiVersion})`);
+        cachedEndpoint = { apiVersion, modelName };
+        return cachedEndpoint;
+      }
+    } catch (err) {
+      console.warn(`[Gemini] Failed to list models on ${apiVersion}:`, err.message);
+    }
+  }
+
+  // Last resort: brute force try each model
+  return await bruteForceModel(apiKey);
+}
+
+/**
+ * Brute-force: try each model+version combo with a tiny request.
+ */
+async function bruteForceModel(apiKey) {
+  console.log('[Gemini] Brute-force testing models...');
+
+  for (const apiVersion of API_VERSIONS) {
+    for (const modelName of PREFERRED_MODELS) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent?key=${apiKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Reply OK' }] }],
+            generationConfig: { maxOutputTokens: 3 },
+          }),
+        });
+
+        if (res.ok) {
+          console.log(`[Gemini] ✓ Found working model: ${modelName} (${apiVersion})`);
+          cachedEndpoint = { apiVersion, modelName };
+          return cachedEndpoint;
+        }
+
+        const errText = await res.text().catch(() => '');
+        // Stop on auth errors
+        if (res.status === 403 || res.status === 401 ||
+            errText.includes('API_KEY_INVALID') || errText.includes('API key not valid')) {
+          throw new Error('API_KEY_INVALID');
+        }
+        if (res.status === 429) {
+          throw new Error('Gemini quota habis. Tunggu 1 menit lalu coba lagi.');
+        }
+        // 404 = model not found, try next
+      } catch (err) {
+        if (err.message === 'API_KEY_INVALID' || err.message.includes('quota')) throw err;
+        // Network error — try next
+      }
+    }
+  }
+
+  throw new Error('Tidak ada model Gemini yang tersedia. Periksa API key Anda di aistudio.google.com');
+}
+
+/**
+ * Reset cached endpoint (call when API key changes)
+ */
+export function resetGeminiCache() {
+  cachedEndpoint = null;
+}
+
+// ─── Test Connection ──────────────────────────────────────────────────────────
+/**
+ * Test if API key works and return the working model name.
+ * @returns {Promise<{ok: boolean, model?: string, error?: string}>}
+ */
+export async function testGeminiConnection(apiKey) {
+  if (!apiKey || !apiKey.trim()) return { ok: false, error: 'API Key kosong' };
+
+  resetGeminiCache();
+
+  try {
+    const endpoint = await discoverModel(apiKey.trim());
+    return { ok: true, model: endpoint.modelName };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// ─── Main OCR Function ────────────────────────────────────────────────────────
 export async function scanKTPWithGemini(imageSource, apiKey) {
   if (!apiKey || !apiKey.trim()) throw new Error('GEMINI_API_KEY_REQUIRED');
+
+  // Discover the best model
+  const { apiVersion, modelName } = await discoverModel(apiKey.trim());
 
   const { data: base64Data, mimeType } = await fileToBase64(imageSource);
 
@@ -129,81 +266,52 @@ export async function scanKTPWithGemini(imageSource, apiKey) {
     },
   };
 
-  let lastError = null;
+  const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent?key=${apiKey.trim()}`;
+  console.log(`[Gemini] Scanning KTP with ${modelName} (${apiVersion})...`);
 
-  for (const modelName of GEMINI_MODELS) {
-    try {
-      const url = `${GEMINI_BASE}/${modelName}:generateContent?key=${apiKey}`;
-      console.log(`[Gemini] Trying model: ${modelName}`);
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  });
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      });
+  if (!response.ok) {
+    let errBody = '';
+    try { errBody = await response.text(); } catch (_) {}
+    console.error('[Gemini] API Error:', response.status, errBody.substring(0, 300));
 
-      if (!response.ok) {
-        let errBody = '';
-        try { errBody = await response.text(); } catch (_) {}
-        console.warn(`[Gemini] ${modelName} → HTTP ${response.status}:`, errBody.substring(0, 200));
-
-        // Auth errors — stop immediately, no point retrying
-        if (response.status === 403 ||
-            (response.status === 400 && (errBody.includes('API_KEY_INVALID') || errBody.includes('API key not valid')))) {
-          throw new Error('API_KEY_INVALID');
-        }
-        if (response.status === 429) {
-          throw new Error('Gemini quota habis. Tunggu 1 menit lalu coba lagi.');
-        }
-        // Model not found — try next
-        if (response.status === 404 || errBody.includes('not found') || errBody.includes('not supported')) {
-          lastError = new Error(`Model ${modelName} tidak tersedia`);
-          continue;
-        }
-        lastError = new Error(`HTTP ${response.status}: ${errBody.substring(0, 120)}`);
-        continue;
-      }
-
-      const result = await response.json();
-      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (!text) {
-        lastError = new Error('Response kosong dari Gemini');
-        continue;
-      }
-
-      console.log(`[Gemini] ✓ Berhasil dengan model: ${modelName}`);
-
-      // Extract JSON
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        lastError = new Error('JSON tidak ditemukan dalam response Gemini');
-        continue;
-      }
-
-      let parsed;
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (e) {
-        lastError = new Error('JSON tidak valid: ' + e.message);
-        continue;
-      }
-
-      return normalizeAndValidate(parsed);
-
-    } catch (err) {
-      // Hard errors — don't retry
-      if (err.message === 'API_KEY_INVALID' ||
-          err.message.includes('quota') ||
-          err.message.includes('Tunggu')) {
-        throw err;
-      }
-      lastError = err;
-      console.warn(`[Gemini] ${modelName} threw:`, err.message);
+    // Reset cache so next call re-discovers
+    if (response.status === 404) {
+      cachedEndpoint = null;
     }
+
+    if (response.status === 403 || (response.status === 400 && errBody.includes('API key'))) {
+      throw new Error('API_KEY_INVALID');
+    }
+    if (response.status === 429) {
+      throw new Error('Gemini quota habis. Tunggu 1 menit lalu coba lagi.');
+    }
+    throw new Error(`Gemini API error (${response.status}): ${errBody.substring(0, 120)}`);
   }
 
-  throw lastError || new Error('Semua model Gemini gagal. Periksa API key Anda.');
+  const result = await response.json();
+  const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!text) throw new Error('Response kosong dari Gemini API');
+
+  console.log('[Gemini] Raw response:', text.substring(0, 200));
+
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('JSON tidak ditemukan dalam response');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    throw new Error('JSON tidak valid: ' + e.message);
+  }
+
+  return normalizeAndValidate(parsed);
 }
 
 // ─── Post-Processing & Validation ─────────────────────────────────────────────
@@ -259,7 +367,6 @@ function normalizeAndValidate(raw) {
   let alamat = str(raw.alamat).toUpperCase().replace(/[|\\]+$/, '').trim();
   let pekerjaan = str(raw.pekerjaan).toUpperCase().replace(/[|\\]/g, '').trim();
 
-  // NIK cross-validation with birth date
   if (nik.length === 16 && tempatTglLahir) {
     nik = crossValidateNIK(nik, tempatTglLahir, jenisKelamin);
   }

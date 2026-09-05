@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Key, Eye, EyeOff, ExternalLink, CheckCircle, AlertCircle, X } from 'lucide-react';
+import { testGeminiConnection, resetGeminiCache } from '../utils/geminiOCR';
 
 /**
  * Gemini API Key configuration modal / inline form
@@ -16,47 +17,14 @@ export default function ApiKeyModal({ apiKey, onSave, onClose }) {
     setStatus('testing');
     setErrMsg('');
 
-    const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
-    let lastErr = '';
-
-    for (const model of models) {
-      try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${key}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: 'Balas dengan kata: OK' }] }],
-              generationConfig: { maxOutputTokens: 5 }
-            })
-          }
-        );
-        if (res.ok) {
-          setStatus('ok');
-          setErrMsg(`Terhubung dengan model: ${model}`);
-          return;
-        }
-        const err = await res.json().catch(() => ({}));
-        const msg = err?.error?.message || `Status ${res.status}`;
-        if (res.status === 403 || res.status === 401 || msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
-          setStatus('error');
-          setErrMsg('API Key tidak valid. Pastikan key dari aistudio.google.com (diawali AIza...)');
-          return;
-        }
-        if (res.status === 429) {
-          setStatus('error');
-          setErrMsg('Quota API habis. Tunggu 1 menit lalu coba lagi.');
-          return;
-        }
-        lastErr = msg;
-        // 404 = model not found, try next
-      } catch (e) {
-        lastErr = e.message;
-      }
+    const result = await testGeminiConnection(key);
+    if (result.ok) {
+      setStatus('ok');
+      setErrMsg(`✓ Terhubung dengan model: ${result.model}`);
+    } else {
+      setStatus('error');
+      setErrMsg(result.error || 'Gagal terhubung ke Gemini API');
     }
-    setStatus('error');
-    setErrMsg(lastErr || 'Gagal terhubung ke Gemini API');
   };
 
   const handleSave = () => {
