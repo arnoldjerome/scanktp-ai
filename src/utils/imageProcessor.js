@@ -72,19 +72,7 @@ export async function normalizeKTPImage(fileOrUrl) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(rotCanvas, 0, 0, targetWidth, targetHeight);
 
-    // 3. Contrast Normalization (1.25x) + Luminance Enhancement
-    const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
-    const d = imageData.data;
-    const CONTRAST = 1.25;
-    const factor = (259 * (CONTRAST * 100 + 255)) / (255 * (259 - CONTRAST * 100));
-
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]     = Math.min(255, Math.max(0, factor * (d[i]     - 128) + 128));
-      d[i + 1] = Math.min(255, Math.max(0, factor * (d[i + 1] - 128) + 128));
-      d[i + 2] = Math.min(255, Math.max(0, factor * (d[i + 2] - 128) + 128));
-    }
-    ctx.putImageData(imageData, 0, 0);
-
+    // 3. Output high-quality clean JPEG with natural colors
     return normCanvas.toDataURL('image/jpeg', 0.95);
   } catch (err) {
     console.warn('[normalizeKTPImage] fallback to original:', err);

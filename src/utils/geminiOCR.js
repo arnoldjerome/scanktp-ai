@@ -325,8 +325,8 @@ export async function scanKTPWithGemini(imageSource, apiKey) {
   }
 
   const imgPart = {
-    inline_data: {
-      mime_type: imgMime.startsWith('image/') ? imgMime : 'image/jpeg',
+    inlineData: {
+      mimeType: imgMime.startsWith('image/') ? imgMime : 'image/jpeg',
       data: imgData,
     },
   };

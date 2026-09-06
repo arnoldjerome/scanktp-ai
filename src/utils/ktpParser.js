@@ -21,12 +21,12 @@ export function parseKTPText(rawText) {
     for (const lbl of labels) {
       const idx = line.toUpperCase().indexOf(lbl.toUpperCase());
       if (idx !== -1) {
-        return line.substring(idx + lbl.length).replace(/^[\s:;.\-=|]+/, '').trim();
+        return line.substring(idx + lbl.length).replace(/^[\s:;.\-=|—–©®~*]+/, '').trim();
       }
     }
     const colonIdx = line.indexOf(':');
-    if (colonIdx !== -1) return line.substring(colonIdx + 1).replace(/^[\s:;.\-=|]+/, '').trim();
-    return line.trim();
+    if (colonIdx !== -1) return line.substring(colonIdx + 1).replace(/^[\s:;.\-=|—–©®~*]+/, '').trim();
+    return line.replace(/^[\s:;.\-=|—–©®~*]+/, '').trim();
   };
 
   // ── Line-by-line extraction ──────────────────────────────────────────────────
@@ -157,9 +157,9 @@ export function parseKTPText(rawText) {
       else if (upper.match(/\bBUDDHA\b|\bBUDHA\b|\bBUDDHIST\b/)) data.agama = 'BUDDHA';
     }
 
-    // STATUS PERKAWINAN (supports MENIKAH, MARRIED, SINGLE, BELUM MENIKAH)
-    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN') || upper.includes('MENIKAH') || upper.includes('MARRIED') || upper.includes('SINGLE')) {
-      if (upper.includes('BELUM') || upper.includes('SINGLE')) data.statusPerkawinan = 'BELUM KAWIN';
+    // STATUS PERKAWINAN (supports MENIKAH, MARRIED, SINGLE, BELUM MENIKAH, pELUM)
+    if (!data.statusPerkawinan && (upper.includes('KAWIN') || upper.includes('PERKAWINAN') || upper.includes('MENIKAH') || upper.includes('MARRIED') || upper.includes('SINGLE'))) {
+      if (upper.includes('BELUM') || upper.includes('PELUM') || upper.includes('SINGLE')) data.statusPerkawinan = 'BELUM KAWIN';
       else if (upper.includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
       else if (upper.includes('CERAI HIDUP') || upper.includes('DIVORCED')) data.statusPerkawinan = 'CERAI HIDUP';
       else if (upper.includes('KAWIN') || upper.includes('MENIKAH') || upper.includes('MARRIED')) data.statusPerkawinan = 'KAWIN';
@@ -258,9 +258,12 @@ function extractDigits(str) {
  * Normalize date string to "KOTA, DD-MM-YYYY" format
  */
 function normalizeDate(val) {
-  // Remove known non-date contamination
-  const clean = val.replace(/^WNI\s*/i, '').replace(/^WNA\s*/i, '').trim();
-  // Try to fix separator
+  // Remove known non-date contamination and leading symbols
+  const clean = val
+    .replace(/^WNI\s*/i, '')
+    .replace(/^WNA\s*/i, '')
+    .replace(/^[^A-Za-z\d]+/, '')
+    .trim();
   return clean.replace(/[\/\.]/g, '-');
 }
 
