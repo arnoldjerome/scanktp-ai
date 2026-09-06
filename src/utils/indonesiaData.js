@@ -15,7 +15,8 @@ export const PROVINCES = [
 
 export const CITIES = [
   'JAKARTA BARAT', 'JAKARTA PUSAT', 'JAKARTA SELATAN', 'JAKARTA TIMUR', 'JAKARTA UTARA',
-  'KABUPATEN GRESIK', 'KABUPATEN PEKALONGAN', 'KOTA SEMARANG', 'KABUPATEN SEMARANG',
+  'KABUPATEN GRESIK', 'KABUPATEN CIANJUR', 'KABUPATEN GUNUNGKIDUL', 'KABUPATEN SLEMAN', 'KABUPATEN BANTUL',
+  'KOTA YOGYAKARTA', 'KABUPATEN KULON PROGO', 'KABUPATEN PEKALONGAN', 'KOTA SEMARANG', 'KABUPATEN SEMARANG',
   'KOTA SURABAYA', 'KABUPATEN SIDOARJO', 'KABUPATEN MOJOKERTO', 'KABUPATEN PASURUAN',
   'KABUPATEN MALANG', 'KOTA MALANG', 'KABUPATEN BANYUWANGI', 'KABUPATEN JEMBER',
   'KABUPATEN KEDIRI', 'KABUPATEN LAMONGAN', 'KABUPATEN TUBAN', 'KABUPATEN BOJONEGORO',
@@ -30,6 +31,7 @@ export function matchFuzzyProvince(query) {
   if (!query) return 'PROVINSI JAWA TIMUR';
   const clean = query.toUpperCase().replace(/[^A-Z\s]/g, '').trim();
 
+  if (clean.includes('YOGYAKARTA') || clean.includes('JOGJA') || clean.includes('ISTIMEWA')) return 'PROVINSI DI YOGYAKARTA';
   if (clean.includes('JAKARTA') || clean.includes('DKI')) return 'PROVINSI DKI JAKARTA';
   if (clean.includes('TIMUR') || clean.includes('TIMU')) return 'PROVINSI JAWA TIMUR';
   if (clean.includes('TENGAH')) return 'PROVINSI JAWA TENGAH';
@@ -46,6 +48,17 @@ export function matchFuzzyCity(query, fullText = '') {
   const clean = (query + ' ' + fullText).toUpperCase().trim();
 
   // Explicit city keyword checks
+  if (clean.includes('GUNUNGKIDUL') || clean.includes('GUNUNG KIDUL') || clean.includes('WONOSARI')) {
+    return 'KABUPATEN GUNUNGKIDUL';
+  }
+  if (clean.includes('CIANJUR') || clean.includes('RANCABALI')) {
+    return 'KABUPATEN CIANJUR';
+  }
+  if (clean.includes('SLEMAN')) return 'KABUPATEN SLEMAN';
+  if (clean.includes('BANTUL')) return 'KABUPATEN BANTUL';
+  if (clean.includes('KULON PROGO') || clean.includes('WATES')) return 'KABUPATEN KULON PROGO';
+  if (clean.includes('YOGYAKARTA') || clean.includes('JOGJA')) return 'KOTA YOGYAKARTA';
+
   if (clean.includes('JAKARTA BARAT')) return 'JAKARTA BARAT';
   if (clean.includes('JAKARTA PUSAT')) return 'JAKARTA PUSAT';
   if (clean.includes('JAKARTA SELATAN')) return 'JAKARTA SELATAN';

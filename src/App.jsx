@@ -5,7 +5,7 @@ import UploadZone from './components/UploadZone';
 import FileList from './components/FileList';
 import ResultPanel from './components/ResultPanel';
 import ApiKeyModal from './components/ApiKeyModal';
-import { preprocessImageForOCR, preprocessImageForGemini, cropNIKRegion } from './utils/imageProcessor';
+import { normalizeKTPImage, cropNIKRegion } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
 import { parseKTPText, repairNikWithDOB } from './utils/ktpParser';
 import { scanKTPWithGemini, parseKTPTextWithGemini } from './utils/geminiOCR';
@@ -140,115 +140,45 @@ export default function App() {
     updateItemStatus(index, { status: 'processing', progress: 5, error: null });
 
     try {
-      // ── Prepare image sources ─────────────────────────────────────────────
-      let imageFile = null;
-      let imageSources = [];
-
+      // ── STEP 0: Universal Preprocessing ("1 Tema yang diterima oleh mata AI") ──
+      // Auto-orient landscape, standardize to 1800px, balance contrast & sharpness
+      updateItemStatus(index, { progress: 10 });
+      let imageSource;
       if (item.file) {
         if (item.file.type === 'application/pdf') {
           const pages = await convertPdfToImages(item.file);
           if (pages.length === 0) throw new Error('PDF kosong');
-          imageSources = pages;
+          imageSource = pages[0];
         } else {
-          imageFile = item.file;
-          const preprocessed = await preprocessImageForOCR(item.file);
-          imageSources = [preprocessed];
+          imageSource = await normalizeKTPImage(item.file);
         }
       } else if (item.previewUrl) {
-        imageSources = [item.previewUrl];
+        imageSource = await normalizeKTPImage(item.previewUrl);
       } else {
         throw new Error('Tidak ada sumber gambar');
       }
 
-      if (imageSources.length === 0) throw new Error('Tidak ada sumber gambar yang valid');
-
-      // ── STEP 1: Tesseract OCR → raw text ─────────────────────────────────
-      updateItemStatus(index, { progress: 15 });
-      const worker = await createWorker('ind+eng');
-      await worker.setParameters({
-        tessedit_pageseg_mode: '4',
-        tessedit_ocr_engine_mode: '1',
-        preserve_interword_spaces: '1',
-      });
-
-      let rawOCRText = '';
-      for (let i = 0; i < imageSources.length; i++) {
-        const result = await worker.recognize(imageSources[i]);
-        rawOCRText += result.data.text + '\n';
-        updateItemStatus(index, { progress: 15 + Math.round(((i + 1) / imageSources.length) * 25) });
-      }
-      await worker.terminate();
-
-      console.log('[Hybrid OCR] Tesseract raw text:\n', rawOCRText.substring(0, 800));
-
-      // ── STEP 1b: Dedicated High-Precision NIK Crop OCR ────────────────────
-      let dedicatedNik = '';
-      try {
-        const nikCropUrl = await cropNIKRegion(imageFile || imageSources[0]);
-        if (nikCropUrl) {
-          const nikWorker = await createWorker('eng');
-          await nikWorker.setParameters({
-            tessedit_char_whitelist: '0123456789',
-            tessedit_pageseg_mode: '7',
-          });
-          const nikRes = await nikWorker.recognize(nikCropUrl);
-          await nikWorker.terminate();
-          const cleanDigits = (nikRes?.data?.text || '').replace(/\D/g, '');
-          if (cleanDigits.length >= 15) {
-            dedicatedNik = cleanDigits.substring(0, 16);
-            console.log('[Dedicated NIK Crop Result]:', dedicatedNik);
-          }
-        }
-      } catch (nikErr) {
-        console.warn('[Dedicated NIK Crop skipped]:', nikErr.message);
-      }
-
-      // ── STEP 2a: Gemini parses raw text → JSON (no image vision) ─────────
+      // ── STRATEGY 1: Gemini Vision AI (Primary if API key exists) ────────
       if (apiKey && apiKey.trim()) {
         try {
-          updateItemStatus(index, { progress: 50 });
-          const parsedData = await parseKTPTextWithGemini(rawOCRText, apiKey);
-
-          const filledCount = Object.values(parsedData).filter(
+          updateItemStatus(index, { progress: 30 });
+          const visionData = await scanKTPWithGemini(imageSource, apiKey);
+          const filledCount = Object.values(visionData).filter(
             v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
           ).length;
 
-          console.log(`[Hybrid OCR] Gemini text-parse: ${filledCount}/16 fields`);
+          console.log(`[Gemini Vision AI] ${filledCount}/16 fields filled`);
 
           if (filledCount >= 5) {
-            let finalData = parsedData;
-
-            // Also try Gemini Vision for comparison, merge best of both
-            if (imageFile && filledCount < 13) {
-              try {
-                updateItemStatus(index, { progress: 70 });
-                const geminiPreprocessed = await preprocessImageForGemini(imageFile);
-                const visionData = await scanKTPWithGemini(geminiPreprocessed, apiKey);
-                const visionFilled = Object.values(visionData).filter(
-                  v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
-                ).length;
-                console.log(`[Hybrid OCR] Gemini Vision: ${visionFilled}/16 fields`);
-                finalData = mergeKTPData(parsedData, visionData);
-              } catch (visionErr) {
-                console.warn('[Hybrid OCR] Vision merge skipped:', visionErr.message);
-              }
+            if (visionData.nik && visionData.tempatTglLahir) {
+              visionData.nik = repairNikWithDOB(visionData.nik, visionData.tempatTglLahir, visionData.jenisKelamin);
             }
-
-            // Apply dedicated NIK crop result and repair
-            if (dedicatedNik && dedicatedNik.length === 16) {
-              finalData.nik = dedicatedNik;
-            }
-            if (finalData.nik) {
-              finalData.nik = repairNikWithDOB(finalData.nik, finalData.tempatTglLahir, finalData.jenisKelamin);
-            }
-
-            updateItemStatus(index, { status: 'done', progress: 100, parsedData: finalData, engine: 'gemini' });
+            updateItemStatus(index, { status: 'done', progress: 100, parsedData: visionData, engine: 'gemini' });
             return;
           }
-
-          console.warn('[Hybrid OCR] Too few fields from Gemini, using basic parser');
+          console.warn('[Gemini Vision AI] Few fields filled, trying OCR fallback...');
         } catch (geminiErr) {
-          console.error('[Gemini Text Parse Error]', geminiErr.message);
+          console.warn('[Gemini Vision AI Error]:', geminiErr.message);
           if (geminiErr.message === 'API_KEY_INVALID') {
             updateItemStatus(index, {
               status: 'error', progress: 0,
@@ -257,20 +187,73 @@ export default function App() {
             });
             return;
           }
-          console.warn('[Hybrid OCR] Gemini failed, falling back to basic parser');
         }
       }
 
-      // ── STEP 2b: Fallback — basic KTP text parser ────────────────────────
-      updateItemStatus(index, { progress: 85 });
-      const parsedData = parseKTPText(rawOCRText);
-      if (dedicatedNik && dedicatedNik.length === 16) {
-        parsedData.nik = dedicatedNik;
+      // ── STRATEGY 2: Tesseract OCR on Standardized Image ──────────────────
+      updateItemStatus(index, { progress: 45 });
+      const worker = await createWorker('ind+eng');
+      await worker.setParameters({
+        tessedit_pageseg_mode: '4',
+        tessedit_ocr_engine_mode: '1',
+        preserve_interword_spaces: '1',
+      });
+
+      const result = await worker.recognize(imageSource);
+      await worker.terminate();
+      const rawOCRText = result.data.text || '';
+      console.log('[Tesseract OCR raw text]:\n', rawOCRText.substring(0, 800));
+
+      updateItemStatus(index, { progress: 80 });
+
+      // If API key is present, also ask Gemini to parse the raw OCR text
+      let parsedData = null;
+      if (apiKey && apiKey.trim() && rawOCRText.trim().length > 20) {
+        try {
+          parsedData = await parseKTPTextWithGemini(rawOCRText, apiKey);
+        } catch (e) {
+          console.warn('[Gemini text-parse fallback]:', e.message);
+        }
       }
-      if (parsedData.nik) {
+
+      // If Gemini text parse not available or returned too few fields, use enhanced ktpParser
+      if (!parsedData || Object.values(parsedData).filter(v => v && v.length > 1).length < 5) {
+        parsedData = parseKTPText(rawOCRText);
+      }
+
+      // Optional high-precision NIK crop only if NIK is missing from text
+      if (!parsedData.nik || parsedData.nik.length < 15) {
+        try {
+          const nikCropUrl = await cropNIKRegion(imageSource);
+          if (nikCropUrl) {
+            const nikWorker = await createWorker('eng');
+            await nikWorker.setParameters({
+              tessedit_char_whitelist: '0123456789',
+              tessedit_pageseg_mode: '7',
+            });
+            const nikRes = await nikWorker.recognize(nikCropUrl);
+            await nikWorker.terminate();
+            const digits = (nikRes?.data?.text || '').replace(/\D/g, '');
+            if (digits.length >= 15) {
+              parsedData.nik = digits.substring(0, 16);
+            }
+          }
+        } catch (nikErr) {
+          console.warn('[NIK crop skipped]:', nikErr.message);
+        }
+      }
+
+      if (parsedData.nik && parsedData.tempatTglLahir) {
         parsedData.nik = repairNikWithDOB(parsedData.nik, parsedData.tempatTglLahir, parsedData.jenisKelamin);
       }
-      updateItemStatus(index, { status: 'done', progress: 100, parsedData, engine: 'tesseract' });
+
+      updateItemStatus(index, {
+        status: 'done',
+        progress: 100,
+        parsedData,
+        engine: (apiKey && apiKey.trim()) ? 'gemini' : 'tesseract',
+      });
+
 
     } catch (err) {
       console.error('Scan error:', err);

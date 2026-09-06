@@ -81,10 +81,10 @@ export function parseKTPText(rawText) {
       if (val && val.length > 2) data.tempatTglLahir = normalizeDate(val);
     }
 
-    // JENIS KELAMIN + GOL DARAH (same line)
-    if (upper.includes('KELAMIN') || upper.match(/^(LAKI|PEREMPUAN)/)) {
-      if (upper.includes('PEREMPUAN')) data.jenisKelamin = 'PEREMPUAN';
-      else if (upper.includes('LAKI')) data.jenisKelamin = 'LAKI-LAKI';
+    // JENIS KELAMIN + GOL DARAH (same line, supports Indonesian & English/WNA)
+    if (upper.includes('KELAMIN') || upper.match(/^(LAKI|PEREMPUAN|MALE|FEMALE)/)) {
+      if (upper.includes('PEREMPUAN') || upper.includes('FEMALE')) data.jenisKelamin = 'PEREMPUAN';
+      else if (upper.includes('LAKI') || upper.includes('MALE')) data.jenisKelamin = 'LAKI-LAKI';
 
       const golMatch = line.match(/(?:GOL(?:\.|\s)*DARAH\s*:?[\s\d]*)([ABO]+)\b/i) ||
                        line.match(/\d([ABO])\b/i) ||
@@ -107,7 +107,12 @@ export function parseKTPText(rawText) {
         !upper.includes('RT') && !upper.includes('KEL') && !upper.includes('KEC')) {
       const val = getValueAfterLabel(line, ['ALAMAT']);
       if (val && val.length > 2) {
-        data.alamat = val.replace(/\bDUEUN\b/i, 'DUSUN').toUpperCase();
+        data.alamat = val
+          .replace(/^[\d\s.;\-:]+/, '') // remove leading OCR item numbers like "3. " or "1. "
+          .replace(/\bDUEUN\b/i, 'DUSUN')
+          .replace(/\bno(\d+)\b/i, 'NO. $1')
+          .toUpperCase()
+          .trim();
       }
     }
 
@@ -125,16 +130,20 @@ export function parseKTPText(rawText) {
     if (!upper.includes('KELAMIN') &&
         (upper.match(/\bKEL\b/) || upper.includes('DESA') || upper.includes('KELURAHAN'))) {
       const val = getValueAfterLabel(line, ['KEL/DESA', 'KELURAHAN', 'DESA', 'KEL']);
-      if (val && val.length > 1) data.kelDesa = val.toUpperCase();
+      if (val && val.length > 1) {
+        data.kelDesa = val.replace(/^[\s.:;\-–—]+/, '').toUpperCase().trim();
+      }
     }
 
     // KECAMATAN
     if (upper.includes('KECAMATAN') || upper.match(/\bKEC\b/)) {
       const val = getValueAfterLabel(line, ['KECAMATAN', 'KEC']);
-      if (val && val.length > 1) data.kecamatan = val.toUpperCase();
+      if (val && val.length > 1) {
+        data.kecamatan = val.replace(/^[\s.:;\-–—\d]+/, '').toUpperCase().trim();
+      }
     }
 
-    // AGAMA
+    // AGAMA (supports Indonesian & English/WNA)
     if (upper.match(/^AGAMA\b/) || upper.match(/AGAMA\s*:/)) {
       const val = getValueAfterLabel(line, ['AGAMA']);
       if (val) data.agama = normalizeAgama(val || line);
@@ -142,36 +151,42 @@ export function parseKTPText(rawText) {
     // Detect religion by keyword if AGAMA label not found
     if (!data.agama) {
       if (upper.match(/\bISLAM\b/)) data.agama = 'ISLAM';
-      else if (upper.match(/\bKRISTEN\b/)) data.agama = 'KRISTEN';
-      else if (upper.match(/\bKATHOLIK\b|\bKATOLIK\b/)) data.agama = 'KATHOLIK';
+      else if (upper.match(/\bKRISTEN\b|\bCHRISTIAN\b/)) data.agama = 'KRISTEN';
+      else if (upper.match(/\bKATHOLIK\b|\bKATOLIK\b|\bCATHOLIC\b/)) data.agama = 'KATHOLIK';
       else if (upper.match(/\bHINDU\b/)) data.agama = 'HINDU';
-      else if (upper.match(/\bBUDDHA\b|\bBUDHA\b/)) data.agama = 'BUDDHA';
+      else if (upper.match(/\bBUDDHA\b|\bBUDHA\b|\bBUDDHIST\b/)) data.agama = 'BUDDHA';
     }
 
-    // STATUS PERKAWINAN
-    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN')) {
-      if (upper.includes('BELUM')) data.statusPerkawinan = 'BELUM KAWIN';
+    // STATUS PERKAWINAN (supports MENIKAH, MARRIED, SINGLE, BELUM MENIKAH)
+    if (upper.includes('KAWIN') || upper.includes('PERKAWINAN') || upper.includes('MENIKAH') || upper.includes('MARRIED') || upper.includes('SINGLE')) {
+      if (upper.includes('BELUM') || upper.includes('SINGLE')) data.statusPerkawinan = 'BELUM KAWIN';
       else if (upper.includes('CERAI MATI')) data.statusPerkawinan = 'CERAI MATI';
-      else if (upper.includes('CERAI HIDUP')) data.statusPerkawinan = 'CERAI HIDUP';
-      else if (upper.includes('KAWIN')) data.statusPerkawinan = 'KAWIN';
+      else if (upper.includes('CERAI HIDUP') || upper.includes('DIVORCED')) data.statusPerkawinan = 'CERAI HIDUP';
+      else if (upper.includes('KAWIN') || upper.includes('MENIKAH') || upper.includes('MARRIED')) data.statusPerkawinan = 'KAWIN';
     }
 
     // PEKERJAAN — strictly after PEKERJAAN label
     if (upper.match(/^PEKERJAAN\b/) || upper.match(/PEKERJAAN\s*:/)) {
       const val = getValueAfterLabel(line, ['PEKERJAAN']);
       if (val) {
-        data.pekerjaan = val
+        let cleanPek = val
           .replace(/\s*(?:WNI|WNA)\s*$/i, '')
           .replace(/\s*\d{2}[-\/]\d{2}[-\/]\d{4}.*$/, '')
-          .replace(/\s+(?:GRESIK|JAKARTA|SURABAYA|SEMARANG|BANDUNG|SIDOARJO)\b.*$/i, '')
+          .replace(/\s+(?:GRESIK|JAKARTA|SURABAYA|SEMARANG|BANDUNG|SIDOARJO|WONOSARI|GUNUNGKIDUL|CIANJUR)\b.*$/i, '')
           .toUpperCase()
           .trim();
+        if (cleanPek.includes('PELAJAR')) cleanPek = 'PELAJAR/MAHASISWA';
+        if (cleanPek === 'OTHERS') cleanPek = 'OTHERS';
+        data.pekerjaan = cleanPek;
       }
     }
 
-    // KEWARGANEGARAAN
-    if (upper.includes('KEWARGANEGARAAN') || upper.match(/\bWNI\b/) || upper.match(/\bWNA\b/)) {
-      if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
+    // KEWARGANEGARAAN (supports WNA, foreign countries)
+    if (upper.includes('KEWARGANEGARAAN') || upper.match(/\bWNI\b/) || upper.match(/\bWNA\b/) ||
+        upper.includes('CHINA') || upper.includes('MALAYSIA') || upper.includes('SINGAPORE')) {
+      if (upper.includes('CHINA')) data.kewarganegaraan = 'WNA (CHINA)';
+      else if (upper.includes('WNA')) data.kewarganegaraan = 'WNA';
+      else if (upper.includes('WNI') || upper.includes('INDONESIA')) data.kewarganegaraan = 'WNI';
       else data.kewarganegaraan = 'WNI';
     }
 

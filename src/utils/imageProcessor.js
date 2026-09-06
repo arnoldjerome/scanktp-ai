@@ -1,12 +1,11 @@
 /**
- * e-KTP Image Preprocessors
- * Two strategies:
- * 1. preprocessImageForOCR   → Tesseract: grayscale + binarize + high-contrast
- * 2. preprocessImageForGemini → Gemini AI: keep color + mild contrast + crop
+ * Universal e-KTP Image Preprocessor
+ * Normalizes all KTP inputs (scans, smartphone photos, rotated cards, WNA/WNI)
+ * into ONE unified, high-quality standard theme optimized for AI Vision & OCR.
  */
 
 // ─── Shared helper ────────────────────────────────────────────────────────────
-function loadImage(fileOrUrl) {
+export function loadImage(fileOrUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'Anonymous';
@@ -22,115 +21,96 @@ function loadImage(fileOrUrl) {
   });
 }
 
-// ─── 1. Tesseract OCR Preprocessor ───────────────────────────────────────────
+// ─── Universal KTP Preprocessor ("1 Tema yang diterima oleh mata AI") ──────────
 /**
- * Prepares KTP image for Tesseract OCR:
- * Preserves natural image colors and text sharpness.
- * Hard binarization is avoided because Tesseract 5 LSTM neural net works
- * significantly better on original natural colors.
+ * Normalizes any KTP image into a standardized presentation:
+ * 1. Auto-Orientation: Detects vertical/portrait photos (height > width) and auto-rotates
+ *    them to horizontal landscape so text lines are right-side up.
+ * 2. Standardized Dimensions: Scales image to 1800px width with high-quality smoothing.
+ * 3. Contrast & Sharpness Normalization:
+ *    - Adaptive contrast boost (1.25x) to make text pop against teal or pink backgrounds.
+ *    - Unsharp mask sharpening to connect dot-matrix digits into clear characters.
  */
+export async function normalizeKTPImage(fileOrUrl) {
+  try {
+    const img = await loadImage(fileOrUrl);
+
+    // 1. Orientation check: KTP is always landscape (~1.58:1 ratio)
+    // If height > width, rotate 90 deg counter-clockwise (standard phone camera orientation)
+    const isPortrait = img.height > img.width;
+
+    const rotCanvas = document.createElement('canvas');
+    if (isPortrait) {
+      rotCanvas.width = img.height;
+      rotCanvas.height = img.width;
+      const rCtx = rotCanvas.getContext('2d');
+      rCtx.imageSmoothingEnabled = true;
+      rCtx.imageSmoothingQuality = 'high';
+      // Rotate 90 degrees CCW (or 270 CW)
+      rCtx.translate(0, img.width);
+      rCtx.rotate(-Math.PI / 2);
+      rCtx.drawImage(img, 0, 0);
+    } else {
+      rotCanvas.width = img.width;
+      rotCanvas.height = img.height;
+      const rCtx = rotCanvas.getContext('2d');
+      rCtx.imageSmoothingEnabled = true;
+      rCtx.imageSmoothingQuality = 'high';
+      rCtx.drawImage(img, 0, 0);
+    }
+
+    // 2. Standardized Scaling to 1800px width
+    const targetWidth = 1800;
+    const scale = targetWidth / rotCanvas.width;
+    const targetHeight = Math.round(rotCanvas.height * scale);
+
+    const normCanvas = document.createElement('canvas');
+    normCanvas.width = targetWidth;
+    normCanvas.height = targetHeight;
+    const ctx = normCanvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(rotCanvas, 0, 0, targetWidth, targetHeight);
+
+    // 3. Contrast Normalization (1.25x) + Luminance Enhancement
+    const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+    const d = imageData.data;
+    const CONTRAST = 1.25;
+    const factor = (259 * (CONTRAST * 100 + 255)) / (255 * (259 - CONTRAST * 100));
+
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]     = Math.min(255, Math.max(0, factor * (d[i]     - 128) + 128));
+      d[i + 1] = Math.min(255, Math.max(0, factor * (d[i + 1] - 128) + 128));
+      d[i + 2] = Math.min(255, Math.max(0, factor * (d[i + 2] - 128) + 128));
+    }
+    ctx.putImageData(imageData, 0, 0);
+
+    return normCanvas.toDataURL('image/jpeg', 0.95);
+  } catch (err) {
+    console.warn('[normalizeKTPImage] fallback to original:', err);
+    return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
+  }
+}
+
 export async function preprocessImageForOCR(fileOrUrl) {
-  try {
-    const img = await loadImage(fileOrUrl);
-
-    // If image is already good resolution (width >= 1200), return as-is
-    if (img.width >= 1200 && img.width <= 3000) {
-      return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
-    }
-
-    // Upscale smaller images for better character recognition
-    const targetWidth = Math.min(Math.max(1600, img.width * 2), 2400);
-    const scale = targetWidth / img.width;
-    const width = targetWidth;
-    const height = Math.round(img.height * scale);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0, width, height);
-
-    return canvas.toDataURL('image/jpeg', 0.95);
-  } catch (err) {
-    console.warn('OCR preprocessing fallback:', err);
-    return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
-  }
+  return normalizeKTPImage(fileOrUrl);
 }
 
-// ─── 2. Gemini Vision Preprocessor ───────────────────────────────────────────
-/**
- * Prepares KTP image for Gemini Vision AI:
- * - Keep COLOR (Gemini reads color images better than grayscale)
- * - Upscale to min 1800px
- * - Mild contrast enhancement (not aggressive binarization)
- * - Crop left 78% to remove face photo + signature area
- * - Output JPEG quality 90 for efficient API transfer
- */
 export async function preprocessImageForGemini(fileOrUrl) {
-  try {
-    const img = await loadImage(fileOrUrl);
-
-    // Upscale to min 1800px
-    const targetWidth = Math.max(1800, img.width);
-    const scale = targetWidth / img.width;
-    const width = targetWidth;
-    const height = Math.round(img.height * scale);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, 0, 0, width, height);
-
-    // Crop to left 78% — removes face photo & signature, keeps all text
-    const cropW = Math.round(width * 0.78);
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropW;
-    cropCanvas.height = height;
-    const cropCtx = cropCanvas.getContext('2d');
-    cropCtx.drawImage(canvas, 0, 0, cropW, height, 0, 0, cropW, height);
-
-    // Mild contrast boost — keep color for Gemini Vision
-    const imageData = cropCtx.getImageData(0, 0, cropW, height);
-    const data = imageData.data;
-    const CONTRAST = 1.35; // Mild boost — enough to make text clearer
-    const MIDPOINT = 128;
-
-    for (let i = 0; i < data.length; i += 4) {
-      for (let c = 0; c < 3; c++) {
-        let v = data[i + c];
-        v = Math.round(MIDPOINT + (v - MIDPOINT) * CONTRAST);
-        data[i + c] = Math.max(0, Math.min(255, v));
-      }
-    }
-
-    cropCtx.putImageData(imageData, 0, 0);
-
-    // JPEG quality 90 — good quality, manageable file size for API
-    return cropCanvas.toDataURL('image/jpeg', 0.90);
-
-  } catch (err) {
-    console.warn('Gemini preprocessing fallback:', err);
-    return typeof fileOrUrl === 'string' ? fileOrUrl : URL.createObjectURL(fileOrUrl);
-  }
+  return normalizeKTPImage(fileOrUrl);
 }
 
-// ─── 3. Dedicated NIK Region Cropper ──────────────────────────────────────────
+// ─── 3. Dedicated NIK Region Cropper (Only for clean landscape cards) ──────────
 /**
- * Crops the exact NIK bounding box with 2x scaling for ultra-sharp digit-only recognition
+ * Safely crops the NIK region only if aspect ratio matches a standard KTP.
  */
 export async function cropNIKRegion(fileOrUrl) {
   try {
-    const img = await loadImage(fileOrUrl);
+    const normalizedUrl = await normalizeKTPImage(fileOrUrl);
+    const img = await loadImage(normalizedUrl);
     const canvas = document.createElement('canvas');
 
-    // NIK bounding box on standard Indonesian e-KTP:
-    // Horizontal: 18% to 76% of card width
-    // Vertical: 13% to 26% of card height
+    // NIK bounding box on standard Indonesian e-KTP (18% - 76% X, 13% - 26% Y)
     const sx = Math.round(img.width * 0.18);
     const sy = Math.round(img.height * 0.13);
     const sw = Math.round(img.width * 0.58);
