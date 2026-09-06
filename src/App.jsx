@@ -137,61 +137,83 @@ export default function App() {
     const item = currentItems[index];
     if (!item || item.status === 'done') return;
 
-    updateItemStatus(index, { status: 'processing', progress: 5, error: null });
+    updateItemStatus(index, { status: 'processing', progress: 10, error: null });
 
     try {
-      // ── STEP 0: Universal Preprocessing ("1 Tema yang diterima oleh mata AI") ──
-      // Auto-orient landscape, standardize to 1800px, balance contrast & sharpness
-      updateItemStatus(index, { progress: 10 });
-      let imageSource;
-      if (item.file) {
-        if (item.file.type === 'application/pdf') {
-          const pages = await convertPdfToImages(item.file);
-          if (pages.length === 0) throw new Error('PDF kosong');
-          imageSource = pages[0];
-        } else {
-          imageSource = await normalizeKTPImage(item.file);
-        }
-      } else if (item.previewUrl) {
-        imageSource = await normalizeKTPImage(item.previewUrl);
-      } else {
-        throw new Error('Tidak ada sumber gambar');
-      }
-
-      // ── STRATEGY 1: Gemini Vision AI (Primary if API key exists) ────────
+      // ── STRATEGY 1: Pure Native Gemini Vision (Direct untouched image) ──
       if (apiKey && apiKey.trim()) {
         try {
           updateItemStatus(index, { progress: 30 });
-          const visionData = await scanKTPWithGemini(imageSource, apiKey);
+          
+          let rawSource;
+          if (item.file) {
+            if (item.file.type === 'application/pdf') {
+              const pages = await convertPdfToImages(item.file);
+              if (pages.length === 0) throw new Error('PDF kosong');
+              rawSource = pages[0];
+            } else {
+              // Send the RAW untouched File directly to Gemini Vision!
+              rawSource = item.file;
+            }
+          } else if (item.previewUrl) {
+            rawSource = item.previewUrl;
+          } else {
+            throw new Error('Tidak ada sumber gambar');
+          }
+
+          updateItemStatus(index, { progress: 55 });
+          const visionData = await scanKTPWithGemini(rawSource, apiKey);
+          
           const filledCount = Object.values(visionData).filter(
             v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
           ).length;
 
-          console.log(`[Gemini Vision AI] ${filledCount}/16 fields filled`);
+          console.log(`[Gemini Vision AI] Sukses: ${filledCount}/16 fields terisi`);
 
-          if (filledCount >= 5) {
-            if (visionData.nik && visionData.tempatTglLahir) {
-              visionData.nik = repairNikWithDOB(visionData.nik, visionData.tempatTglLahir, visionData.jenisKelamin);
-            }
-            updateItemStatus(index, { status: 'done', progress: 100, parsedData: visionData, engine: 'gemini' });
-            return;
-          }
-          console.warn('[Gemini Vision AI] Few fields filled, trying OCR fallback...');
+          // Pure Gemini Vision result (never overwrite Gemini's eye with regex heuristics)
+          updateItemStatus(index, {
+            status: 'done',
+            progress: 100,
+            parsedData: visionData,
+            engine: 'gemini',
+          });
+          return;
         } catch (geminiErr) {
-          console.warn('[Gemini Vision AI Error]:', geminiErr.message);
+          console.error('[Gemini Vision Error]:', geminiErr);
           if (geminiErr.message === 'API_KEY_INVALID') {
             updateItemStatus(index, {
               status: 'error', progress: 0,
-              error: '❌ API Key Gemini tidak valid. Klik "Gemini Aktif" di header untuk memperbarui key.',
+              error: '❌ API Key Gemini tidak valid. Periksa key di pojok kanan atas.',
               engine: null
             });
             return;
           }
+          if (geminiErr.message?.includes('quota') || geminiErr.message?.includes('429')) {
+            updateItemStatus(index, {
+              status: 'error', progress: 0,
+              error: '⚠️ Kuota Gemini API habis (429). Tunggu 1 menit atau ganti API key.',
+              engine: null
+            });
+            return;
+          }
+          console.warn('[Gemini Vision bermasalah, beralih ke Tesseract offline]:', geminiErr.message);
         }
       }
 
-      // ── STRATEGY 2: Tesseract OCR on Standardized Image ──────────────────
+      // ── STRATEGY 2: Tesseract OCR (Hanya untuk Offline / Fallback) ──────
       updateItemStatus(index, { progress: 45 });
+      let ocrImageSource;
+      if (item.file) {
+        if (item.file.type === 'application/pdf') {
+          const pages = await convertPdfToImages(item.file);
+          ocrImageSource = pages[0];
+        } else {
+          ocrImageSource = await normalizeKTPImage(item.file);
+        }
+      } else {
+        ocrImageSource = await normalizeKTPImage(item.previewUrl);
+      }
+
       const worker = await createWorker('ind+eng');
       await worker.setParameters({
         tessedit_pageseg_mode: '4',
@@ -199,32 +221,19 @@ export default function App() {
         preserve_interword_spaces: '1',
       });
 
-      const result = await worker.recognize(imageSource);
+      const result = await worker.recognize(ocrImageSource);
       await worker.terminate();
       const rawOCRText = result.data.text || '';
       console.log('[Tesseract OCR raw text]:\n', rawOCRText.substring(0, 800));
 
       updateItemStatus(index, { progress: 80 });
 
-      // If API key is present, also ask Gemini to parse the raw OCR text
-      let parsedData = null;
-      if (apiKey && apiKey.trim() && rawOCRText.trim().length > 20) {
-        try {
-          parsedData = await parseKTPTextWithGemini(rawOCRText, apiKey);
-        } catch (e) {
-          console.warn('[Gemini text-parse fallback]:', e.message);
-        }
-      }
+      let parsedData = parseKTPText(rawOCRText);
 
-      // If Gemini text parse not available or returned too few fields, use enhanced ktpParser
-      if (!parsedData || Object.values(parsedData).filter(v => v && v.length > 1).length < 5) {
-        parsedData = parseKTPText(rawOCRText);
-      }
-
-      // Optional high-precision NIK crop only if NIK is missing from text
+      // Dedicated NIK crop fallback if NIK missing
       if (!parsedData.nik || parsedData.nik.length < 15) {
         try {
-          const nikCropUrl = await cropNIKRegion(imageSource);
+          const nikCropUrl = await cropNIKRegion(ocrImageSource);
           if (nikCropUrl) {
             const nikWorker = await createWorker('eng');
             await nikWorker.setParameters({
@@ -251,9 +260,8 @@ export default function App() {
         status: 'done',
         progress: 100,
         parsedData,
-        engine: (apiKey && apiKey.trim()) ? 'gemini' : 'tesseract',
+        engine: 'tesseract',
       });
-
 
     } catch (err) {
       console.error('Scan error:', err);
@@ -265,7 +273,7 @@ export default function App() {
     }
   };
 
-  // Run OCR on all pending items
+    // Run OCR on all pending items
   const handleScanAll = async () => {
     if (items.length === 0 || isProcessingAny) return;
     setIsProcessingAny(true);
