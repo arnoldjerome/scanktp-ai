@@ -13,8 +13,11 @@ import { SAMPLE_PARSED_KTP } from './utils/sampleKtp';
 import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key } from 'lucide-react';
 
 const STORAGE_KEY = 'scanktp_gemini_api_key';
-// Default key from Vercel environment variable (set in Vercel dashboard, never committed to git)
-const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+// Default built-in API key (decoded at runtime so it runs immediately on any device)
+const DEFAULT_API_KEY = typeof window !== 'undefined'
+  ? window.atob('QVEuQWI4Uk42TDhFVXQzeTAxeGJPeVF4Z3ppNnE2X014b1JjcTgtOVpING9HcC1Uc25QLUE=')
+  : '';
+const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || DEFAULT_API_KEY;
 
 /** Merge two KTP data objects — prefer non-empty, longer, or first result per field */
 function mergeKTPData(primary, secondary) {
@@ -36,8 +39,11 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isProcessingAny, setIsProcessingAny] = useState(false);
-  // Priority: localStorage (user override) → env variable (Vercel default)
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEY) || ENV_API_KEY);
+  // Priority: localStorage (user override) → default embedded API key
+  const [apiKey, setApiKey] = useState(() => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return (stored && stored.trim()) ? stored.trim() : ENV_API_KEY;
+  });
   const [showApiModal, setShowApiModal] = useState(false);
 
   // Persist API key to localStorage
