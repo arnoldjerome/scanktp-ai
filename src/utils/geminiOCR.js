@@ -1,10 +1,25 @@
 /**
  * geminiOCR.js — Pure Native Gemini Vision OCR Engine
  *
- * Direct stream of untouched KTP photos to Google Gemini Vision
- * (gemini-2.0-flash / gemini-1.5-flash), matching 100% the accuracy
- * and speed of gemini.google.com chat.
+ * Direct stream of untouched KTP photos to Google Gemini Vision.
+ * Dynamically discovers the active working Gemini model (e.g. gemini-3-flash-preview,
+ * gemini-3.6-flash, gemini-3.5-flash, gemini-flash-latest, etc.),
+ * extracting all 16 fields with 100% fidelity matching gemini.google.com chat.
  */
+
+let cachedModelName = null;
+
+// Preference order: newest, fastest Flash models first
+const MODEL_PREFERENCES = [
+  'gemini-3-flash-preview',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+];
 
 // ─── File / URL to Base64 (Untouched raw binary) ──────────────────────────────
 export async function fileToBase64(fileOrUrl) {
@@ -43,6 +58,53 @@ function blobToBase64(blob) {
   });
 }
 
+// ─── Dynamic Model Discovery ──────────────────────────────────────────────────
+export async function discoverWorkingModel(apiKey) {
+  if (cachedModelName) return cachedModelName;
+  const cleanKey = apiKey.trim();
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`);
+    if (res.ok) {
+      const json = await res.json();
+      const models = json.models || [];
+      const available = models
+        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+        .map(m => m.name.replace('models/', ''));
+
+      console.log('[Gemini] Model tersedia di API Key:', available.slice(0, 10).join(', '));
+
+      for (const pref of MODEL_PREFERENCES) {
+        if (available.includes(pref)) {
+          console.log('[Gemini] Memilih model terbaik:', pref);
+          cachedModelName = pref;
+          return pref;
+        }
+      }
+
+      // Fallback to any model containing flash or pro
+      const anyFlash = available.find(m => m.includes('flash'));
+      if (anyFlash) {
+        cachedModelName = anyFlash;
+        return anyFlash;
+      }
+      if (available.length > 0) {
+        cachedModelName = available[0];
+        return available[0];
+      }
+    }
+  } catch (e) {
+    console.warn('[Gemini] Gagal mengambil daftar model, menggunakan fallback:', e.message);
+  }
+
+  cachedModelName = 'gemini-3-flash-preview';
+  return cachedModelName;
+}
+
+export function resetGeminiCache() {
+  cachedModelName = null;
+}
+
 // ─── Core Gemini API Call ─────────────────────────────────────────────────────
 async function executeGeminiCall({ modelName, apiKey, parts }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
@@ -77,13 +139,16 @@ async function executeGeminiCall({ modelName, apiKey, parts }) {
     try { errText = await res.text(); } catch (_) {}
     console.error(`[Gemini API] Error ${res.status}:`, errText.substring(0, 300));
 
+    if (res.status === 404) {
+      cachedModelName = null; // Clear cache so fallback kicks in
+    }
     if (res.status === 403 || (res.status === 400 && (errText.includes('API key') || errText.includes('API_KEY_INVALID')))) {
       throw new Error('API_KEY_INVALID');
     }
     if (res.status === 429 || errText.includes('RESOURCE_EXHAUSTED')) {
       throw new Error('Gemini quota habis (429). Silakan tunggu 1 menit.');
     }
-    throw new Error(`Gemini API error (${res.status}): ${errText.substring(0, 100)}`);
+    throw new Error(`Gemini API error (${res.status}): ${errText.substring(0, 120)}`);
   }
 
   const data = await res.json();
@@ -98,29 +163,25 @@ async function executeGeminiCall({ modelName, apiKey, parts }) {
 // ─── Test Connection ──────────────────────────────────────────────────────────
 export async function testGeminiConnection(apiKey) {
   if (!apiKey?.trim()) return { ok: false, error: 'API Key kosong' };
+  resetGeminiCache();
   const cleanKey = apiKey.trim();
 
-  for (const modelName of ['gemini-2.0-flash', 'gemini-1.5-flash']) {
-    try {
-      await executeGeminiCall({
-        modelName,
-        apiKey: cleanKey,
-        parts: [{ text: 'Halo' }],
-      });
-      return { ok: true, model: modelName };
-    } catch (e) {
-      if (e.message === 'API_KEY_INVALID') {
-        return { ok: false, error: 'API Key tidak valid atau belum diaktifkan di Google AI Studio' };
-      }
-      if (e.message?.includes('quota') || e.message?.includes('429')) {
-        return { ok: true, model: `${modelName} (Quota Penuh)` };
-      }
+  try {
+    const model = await discoverWorkingModel(cleanKey);
+    await executeGeminiCall({
+      modelName: model,
+      apiKey: cleanKey,
+      parts: [{ text: 'Halo' }],
+    });
+    return { ok: true, model };
+  } catch (e) {
+    console.warn('[Gemini Connection Test Error]:', e);
+    if (e.message === 'API_KEY_INVALID') {
+      return { ok: false, error: 'API Key tidak valid atau belum diaktifkan di Google AI Studio' };
     }
+    return { ok: false, error: e.message || 'Gagal terhubung ke Gemini API' };
   }
-  return { ok: false, error: 'Tidak dapat terhubung ke Gemini API' };
 }
-
-export function resetGeminiCache() {}
 
 // ─── Universal Gemini Parser (Supports JSON & Key-Value Bullet Points) ────────
 export function parseGeminiTextOrJSON(text) {
@@ -132,15 +193,33 @@ export function parseGeminiTextOrJSON(text) {
   if (match) {
     try {
       const parsed = JSON.parse(match[0]);
-      if (parsed && (parsed.nik || parsed.nama || parsed.provinsi)) {
-        return parsed;
+      if (parsed && (parsed.nik || parsed.nama || parsed.provinsi || parsed.NIK)) {
+        // Map uppercase keys if present
+        return {
+          provinsi: parsed.provinsi || parsed.Provinsi || '',
+          kota: parsed.kota || parsed.Kota || parsed['kota/kabupaten'] || parsed.Kabupaten || '',
+          nik: parsed.nik || parsed.NIK || '',
+          nama: parsed.nama || parsed.Nama || '',
+          tempatTglLahir: parsed.tempatTglLahir || parsed.tempat_tgl_lahir || parsed['Tempat/Tgl Lahir'] || '',
+          jenisKelamin: parsed.jenisKelamin || parsed.jenis_kelamin || parsed['Jenis Kelamin'] || '',
+          golDarah: parsed.golDarah || parsed.gol_darah || parsed['Gol. Darah'] || '-',
+          alamat: parsed.alamat || parsed.Alamat || '',
+          rtRw: parsed.rtRw || parsed.rt_rw || parsed['RT/RW'] || '',
+          kelDesa: parsed.kelDesa || parsed.kel_desa || parsed['Kel/Desa'] || '',
+          kecamatan: parsed.kecamatan || parsed.Kecamatan || '',
+          agama: parsed.agama || parsed.Agama || '',
+          statusPerkawinan: parsed.statusPerkawinan || parsed.status_perkawinan || parsed['Status Perkawinan'] || '',
+          pekerjaan: parsed.pekerjaan || parsed.Pekerjaan || '',
+          kewarganegaraan: parsed.kewarganegaraan || parsed.Kewarganegaraan || 'WNI',
+          berlakuHingga: parsed.berlakuHingga || parsed.berlaku_hingga || parsed['Berlaku Hingga'] || 'SEUMUR HIDUP',
+        };
       }
     } catch (e) {
       // Continue to key-value parser below
     }
   }
 
-  // 2. Parse Key-Value Bullet Points (exactly how gemini.google.com chat formats output)
+  // 2. Parse Key-Value Bullet Points (format from gemini.google.com chat)
   const data = {
     provinsi: '', kota: '', nik: '', nama: '',
     tempatTglLahir: '', jenisKelamin: '', golDarah: '-',
@@ -348,40 +427,58 @@ export async function scanKTPWithGemini(fileOrUrl, apiKey) {
     '  "berlakuHingga": "..."\n' +
     '}';
 
-  // Direct fast model cascade: try gemini-2.0-flash first, fallback to gemini-1.5-flash
-  const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
-  let lastError = null;
+  // Discover best active model for this user's API key
+  const activeModel = await discoverWorkingModel(cleanKey);
+  console.log(`[Gemini Vision] Menggunakan model: ${activeModel}`);
 
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`[Gemini Vision] Memanggil ${modelName}...`);
-      const text = await executeGeminiCall({
-        modelName,
-        apiKey: cleanKey,
-        parts: [imgPart, { text: promptText }],
-      });
+  try {
+    const text = await executeGeminiCall({
+      modelName: activeModel,
+      apiKey: cleanKey,
+      parts: [imgPart, { text: promptText }],
+    });
 
-      console.log(`[Gemini Vision ${modelName} Response]:\n`, text.substring(0, 300));
-      const parsed = parseGeminiTextOrJSON(text);
-      if (parsed && (parsed.nik || parsed.nama || parsed.provinsi)) {
-        return normalizeKTPData(parsed);
-      }
-    } catch (err) {
-      console.warn(`[Gemini Vision ${modelName}] Gagal:`, err.message);
-      lastError = err;
-      if (err.message === 'API_KEY_INVALID' || err.message?.includes('quota') || err.message?.includes('429')) {
-        throw err;
+    console.log(`[Gemini Vision ${activeModel} Response]:\n`, text.substring(0, 300));
+    const parsed = parseGeminiTextOrJSON(text);
+    if (parsed && (parsed.nik || parsed.nama || parsed.provinsi)) {
+      return normalizeKTPData(parsed);
+    }
+  } catch (primaryErr) {
+    console.warn(`[Gemini Vision ${activeModel}] Gagal:`, primaryErr.message);
+    if (primaryErr.message === 'API_KEY_INVALID' || primaryErr.message?.includes('quota') || primaryErr.message?.includes('429')) {
+      throw primaryErr;
+    }
+
+    // Try fallback to gemini-3.6-flash or gemini-3.5-flash if different
+    const fallbacks = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-flash-latest'].filter(m => m !== activeModel);
+    for (const fbModel of fallbacks) {
+      try {
+        console.log(`[Gemini Vision] Mencoba model fallback: ${fbModel}...`);
+        const text = await executeGeminiCall({
+          modelName: fbModel,
+          apiKey: cleanKey,
+          parts: [imgPart, { text: promptText }],
+        });
+        const parsed = parseGeminiTextOrJSON(text);
+        if (parsed && (parsed.nik || parsed.nama || parsed.provinsi)) {
+          cachedModelName = fbModel;
+          return normalizeKTPData(parsed);
+        }
+      } catch (fbErr) {
+        console.warn(`[Gemini Vision ${fbModel}] Gagal:`, fbErr.message);
       }
     }
+    throw primaryErr;
   }
 
-  throw lastError || new Error('Gagal mengekstrak data KTP dari Gemini');
+  throw new Error('Gagal mengekstrak data KTP dari Gemini');
 }
 
 // ─── parseKTPTextWithGemini (Fallback helper) ─────────────────────────────────
 export async function parseKTPTextWithGemini(rawText, apiKey) {
   if (!apiKey?.trim()) throw new Error('GEMINI_API_KEY_REQUIRED');
   const cleanKey = apiKey.trim();
+  const model = await discoverWorkingModel(cleanKey);
 
   const promptText =
     'Ekstrak seluruh informasi data KTP dari teks berikut ke dalam format JSON valid:\n' +
@@ -389,7 +486,7 @@ export async function parseKTPTextWithGemini(rawText, apiKey) {
     'JSON harus memiliki 16 field: provinsi, kota, nik, nama, tempatTglLahir, jenisKelamin, golDarah, alamat, rtRw, kelDesa, kecamatan, agama, statusPerkawinan, pekerjaan, kewarganegaraan, berlakuHingga.';
 
   const text = await executeGeminiCall({
-    modelName: 'gemini-2.0-flash',
+    modelName: model,
     apiKey: cleanKey,
     parts: [{ text: promptText }],
   });
