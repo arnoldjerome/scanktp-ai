@@ -5,14 +5,17 @@ import UploadZone from './components/UploadZone';
 import FileList from './components/FileList';
 import ResultPanel from './components/ResultPanel';
 import ApiKeyModal from './components/ApiKeyModal';
+import LoginScreen from './components/LoginScreen';
 import { normalizeKTPImage, cropNIKRegion } from './utils/imageProcessor';
 import { convertPdfToImages } from './utils/pdfProcessor';
 import { parseKTPText, repairNikWithDOB } from './utils/ktpParser';
 import { scanKTPWithGemini, parseKTPTextWithGemini } from './utils/geminiOCR';
 import { SAMPLE_PARSED_KTP } from './utils/sampleKtp';
-import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key } from 'lucide-react';
+import { Sparkles, Zap, FileSpreadsheet, ShieldCheck, Key, CheckCircle2 } from 'lucide-react';
 
 const STORAGE_KEY = 'scanktp_gemini_api_key';
+const AUTH_USER_KEY = 'scanktp_auth_user';
+
 // Default built-in API key (decoded at runtime so it runs immediately on any device)
 const DEFAULT_API_KEY = typeof window !== 'undefined'
   ? window.atob('QVEuQWI4Uk42TDhFVXQzeTAxeGJPeVF4Z3ppNnE2X014b1JjcTgtOVpING9HcC1Uc25QLUE=')
@@ -36,6 +39,8 @@ function mergeKTPData(primary, secondary) {
 }
 
 export default function App() {
+  // Authentication state
+  const [currentUser, setCurrentUser] = useState(() => localStorage.getItem(AUTH_USER_KEY) || '');
   const [items, setItems] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isProcessingAny, setIsProcessingAny] = useState(false);
@@ -45,6 +50,17 @@ export default function App() {
     return (stored && stored.trim()) ? stored.trim() : ENV_API_KEY;
   });
   const [showApiModal, setShowApiModal] = useState(false);
+
+  // Login & Logout
+  const handleLogin = (name) => {
+    setCurrentUser(name);
+    localStorage.setItem(AUTH_USER_KEY, name);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser('');
+    localStorage.removeItem(AUTH_USER_KEY);
+  };
 
   // Persist API key to localStorage
   const handleSaveApiKey = (key) => {
@@ -257,6 +273,11 @@ export default function App() {
     setIsProcessingAny(false);
   };
 
+  // If user is not logged in, show Login Screen
+  if (!currentUser) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-[#080c14] text-slate-100 font-sans">
       
@@ -266,6 +287,8 @@ export default function App() {
         fileCount={items.length}
         hasApiKey={!!(apiKey && apiKey.trim())}
         onOpenApiKey={() => setShowApiModal(true)}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       {/* API Key Modal */}
@@ -288,12 +311,10 @@ export default function App() {
             </div>
             <div>
               <h2 className="text-sm font-bold text-white flex items-center">
-                Scan e-KTP dengan Gemini AI Vision
+                Hi {currentUser}! 👋 Scan e-KTP dengan Gemini AI Vision
               </h2>
               <p className="text-xs text-slate-400">
-                {apiKey
-                  ? 'Gemini AI aktif — akurasi maksimal. Unggah foto KTP dan scan otomatis.'
-                  : 'Klik "Set API Key" di atas untuk mengaktifkan AI Vision. Gratis di aistudio.google.com'}
+                AI Vision aktif dan siap memindai KTP Anda secara instan dengan akurasi maksimal.
               </p>
             </div>
           </div>
