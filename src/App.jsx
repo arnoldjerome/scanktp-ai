@@ -137,70 +137,45 @@ export default function App() {
     const item = currentItems[index];
     if (!item || item.status === 'done') return;
 
-    updateItemStatus(index, { status: 'processing', progress: 10, error: null });
+    updateItemStatus(index, { status: 'processing', progress: 15, error: null });
 
     try {
-      // ── STRATEGY 1: Pure Native Gemini Vision (Direct untouched image) ──
+      // ── IF USER HAS GEMINI API KEY: EXCLUSIVE GEMINI VISION AI ───────────
+      // Pure untouched original photo sent directly to Gemini 2.0 Flash / 1.5 Flash
       if (apiKey && apiKey.trim()) {
-        try {
-          updateItemStatus(index, { progress: 30 });
-          
-          let rawSource;
-          if (item.file) {
-            if (item.file.type === 'application/pdf') {
-              const pages = await convertPdfToImages(item.file);
-              if (pages.length === 0) throw new Error('PDF kosong');
-              rawSource = pages[0];
-            } else {
-              // Send the RAW untouched File directly to Gemini Vision!
-              rawSource = item.file;
-            }
-          } else if (item.previewUrl) {
-            rawSource = item.previewUrl;
+        updateItemStatus(index, { progress: 35 });
+        
+        let rawSource;
+        if (item.file) {
+          if (item.file.type === 'application/pdf') {
+            const pages = await convertPdfToImages(item.file);
+            if (pages.length === 0) throw new Error('PDF kosong');
+            rawSource = pages[0];
           } else {
-            throw new Error('Tidak ada sumber gambar');
+            // Direct untouched original file
+            rawSource = item.file;
           }
-
-          updateItemStatus(index, { progress: 55 });
-          const visionData = await scanKTPWithGemini(rawSource, apiKey);
-          
-          const filledCount = Object.values(visionData).filter(
-            v => v && v !== 'WNI' && v !== 'SEUMUR HIDUP' && v !== '-' && v.length > 1
-          ).length;
-
-          console.log(`[Gemini Vision AI] Sukses: ${filledCount}/16 fields terisi`);
-
-          // Pure Gemini Vision result (never overwrite Gemini's eye with regex heuristics)
-          updateItemStatus(index, {
-            status: 'done',
-            progress: 100,
-            parsedData: visionData,
-            engine: 'gemini',
-          });
-          return;
-        } catch (geminiErr) {
-          console.error('[Gemini Vision Error]:', geminiErr);
-          if (geminiErr.message === 'API_KEY_INVALID') {
-            updateItemStatus(index, {
-              status: 'error', progress: 0,
-              error: '❌ API Key Gemini tidak valid. Periksa key di pojok kanan atas.',
-              engine: null
-            });
-            return;
-          }
-          if (geminiErr.message?.includes('quota') || geminiErr.message?.includes('429')) {
-            updateItemStatus(index, {
-              status: 'error', progress: 0,
-              error: '⚠️ Kuota Gemini API habis (429). Tunggu 1 menit atau ganti API key.',
-              engine: null
-            });
-            return;
-          }
-          console.warn('[Gemini Vision bermasalah, beralih ke Tesseract offline]:', geminiErr.message);
+        } else if (item.previewUrl) {
+          rawSource = item.previewUrl;
+        } else {
+          throw new Error('Tidak ada sumber gambar');
         }
+
+        updateItemStatus(index, { progress: 65 });
+        const visionData = await scanKTPWithGemini(rawSource, apiKey.trim());
+        
+        console.log('[Gemini Vision AI] Berhasil memindai item #' + (index + 1));
+
+        updateItemStatus(index, {
+          status: 'done',
+          progress: 100,
+          parsedData: visionData,
+          engine: 'gemini',
+        });
+        return;
       }
 
-      // ── STRATEGY 2: Tesseract OCR (Hanya untuk Offline / Fallback) ──────
+      // ── ONLY IF NO API KEY AT ALL: Local Tesseract OCR (Offline Mode) ────
       updateItemStatus(index, { progress: 45 });
       let ocrImageSource;
       if (item.file) {
@@ -224,37 +199,9 @@ export default function App() {
       const result = await worker.recognize(ocrImageSource);
       await worker.terminate();
       const rawOCRText = result.data.text || '';
-      console.log('[Tesseract OCR raw text]:\n', rawOCRText.substring(0, 800));
 
-      updateItemStatus(index, { progress: 80 });
-
+      updateItemStatus(index, { progress: 85 });
       let parsedData = parseKTPText(rawOCRText);
-
-      // Dedicated NIK crop fallback if NIK missing
-      if (!parsedData.nik || parsedData.nik.length < 15) {
-        try {
-          const nikCropUrl = await cropNIKRegion(ocrImageSource);
-          if (nikCropUrl) {
-            const nikWorker = await createWorker('eng');
-            await nikWorker.setParameters({
-              tessedit_char_whitelist: '0123456789',
-              tessedit_pageseg_mode: '7',
-            });
-            const nikRes = await nikWorker.recognize(nikCropUrl);
-            await nikWorker.terminate();
-            const digits = (nikRes?.data?.text || '').replace(/\D/g, '');
-            if (digits.length >= 15) {
-              parsedData.nik = digits.substring(0, 16);
-            }
-          }
-        } catch (nikErr) {
-          console.warn('[NIK crop skipped]:', nikErr.message);
-        }
-      }
-
-      if (parsedData.nik && parsedData.tempatTglLahir) {
-        parsedData.nik = repairNikWithDOB(parsedData.nik, parsedData.tempatTglLahir, parsedData.jenisKelamin);
-      }
 
       updateItemStatus(index, {
         status: 'done',
@@ -265,9 +212,16 @@ export default function App() {
 
     } catch (err) {
       console.error('Scan error:', err);
+      let userErrMsg = err.message || 'Gagal melakukan scan';
+      if (err.message === 'API_KEY_INVALID') {
+        userErrMsg = '❌ API Key Gemini tidak valid. Periksa key di pojok kanan atas.';
+      } else if (err.message?.includes('quota') || err.message?.includes('429')) {
+        userErrMsg = '⚠️ Kuota Gemini API habis (429). Tunggu 1 menit atau gunakan key lain.';
+      }
       updateItemStatus(index, {
-        status: 'error', progress: 0,
-        error: err.message || 'Gagal melakukan scan',
+        status: 'error',
+        progress: 0,
+        error: userErrMsg,
         engine: null,
       });
     }
